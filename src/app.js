@@ -155,6 +155,19 @@ const AppState = {
 
 let chartSubjectDist = null;
 let chartDailyVolume = null;
+let chartMistakesDist = null;
+let chartDiffMastery = null;
+
+// Scratchpad Whiteboard State
+let scratchpadCanvas = null;
+let scratchpadCtx = null;
+let isScratchpadDrawing = false;
+let scratchpadColor = '#2563eb';
+let scratchpadSize = 4;
+
+// Batch Mode State
+let isBatchMode = false;
+let batchSelectedDoubtIds = new Set();
 
 // Live Camera State
 let liveCameraStream = null;
@@ -1654,6 +1667,8 @@ function renderAnalyticsAndCharts() {
   renderPracticeLogsHistory();
   renderSubjectDistributionChart();
   renderDailyVolumeChart();
+  renderMistakesDistributionChart();
+  renderDifficultyMasteryChart();
   updateHeaderMetrics();
 }
 
@@ -1817,6 +1832,118 @@ function renderDailyVolumeChart() {
       },
       plugins: {
         legend: { display: false }
+      }
+    }
+  });
+}
+
+function renderMistakesDistributionChart() {
+  const canvas = document.getElementById('chart-mistakes-dist');
+  if (!canvas || !window.Chart) return;
+
+  const isDark = document.documentElement.classList.contains('dark');
+  const textColor = isDark ? '#94a3b8' : '#475569';
+
+  const mistakeCounts = {
+    'Calculation Error': 0,
+    'Conceptual Gap': 0,
+    'Silly Mistake': 0,
+    'Misread Question': 0,
+    'Time Pressure': 0,
+    'Formula Forgotten': 0
+  };
+
+  (AppState.doubts || []).forEach(d => {
+    if (d.mistake_type && mistakeCounts[d.mistake_type] !== undefined) {
+      mistakeCounts[d.mistake_type]++;
+    }
+  });
+
+  const labels = Object.keys(mistakeCounts);
+  const data = Object.values(mistakeCounts);
+
+  if (chartMistakesDist) chartMistakesDist.destroy();
+
+  chartMistakesDist = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Doubts',
+        data: data,
+        backgroundColor: ['#ef4444', '#f59e0b', '#8b5cf6', '#3b82f6', '#ec4899', '#10b981'],
+        borderRadius: 6
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: textColor, font: { size: 10 }, stepSize: 1 }, grid: { color: isDark ? '#2E2E2E' : '#f1f5f9' }, beginAtZero: true },
+        y: { ticks: { color: textColor, font: { size: 9, weight: 'bold' } }, grid: { display: false } }
+      },
+      plugins: {
+        legend: { display: false }
+      }
+    }
+  });
+}
+
+function renderDifficultyMasteryChart() {
+  const canvas = document.getElementById('chart-diff-mastery');
+  if (!canvas || !window.Chart) return;
+
+  const isDark = document.documentElement.classList.contains('dark');
+  const textColor = isDark ? '#94a3b8' : '#475569';
+
+  const diffs = ['Easy', 'Medium', 'Hard', 'JEE Advanced'];
+  const totalByDiff = [0, 0, 0, 0];
+  const masteredByDiff = [0, 0, 0, 0];
+
+  (AppState.doubts || []).forEach(d => {
+    const idx = diffs.indexOf(d.difficulty);
+    if (idx !== -1) {
+      totalByDiff[idx]++;
+      if ((d.mastery_level || 0) >= 3) {
+        masteredByDiff[idx]++;
+      }
+    }
+  });
+
+  if (chartDiffMastery) chartDiffMastery.destroy();
+
+  chartDiffMastery = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: diffs,
+      datasets: [
+        {
+          label: 'Mastered',
+          data: masteredByDiff,
+          backgroundColor: '#10b981',
+          borderRadius: 6
+        },
+        {
+          label: 'Total Doubts',
+          data: totalByDiff,
+          backgroundColor: isDark ? '#334155' : '#cbd5e1',
+          borderRadius: 6
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: textColor, font: { size: 10, weight: 'bold' } }, grid: { display: false } },
+        y: { ticks: { color: textColor, font: { size: 10 }, stepSize: 1 }, grid: { color: isDark ? '#2E2E2E' : '#f1f5f9' }, beginAtZero: true }
+      },
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { color: textColor, font: { size: 10 } }
+        }
       }
     }
   });
@@ -2868,3 +2995,1294 @@ function showToast(message, type = 'info') {
     setTimeout(() => toast.remove(), 300);
   }, 3200);
 }
+
+// =============================================================================
+// 13. LATEX SNIPPET INSERTION HELPER
+// =============================================================================
+function insertLatexSnippet(targetId, snippet) {
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  const start = el.selectionStart || 0;
+  const end = el.selectionEnd || 0;
+  const text = el.value || '';
+  el.value = text.substring(0, start) + snippet + text.substring(end);
+  el.focus();
+  el.selectionStart = el.selectionEnd = start + snippet.length;
+}
+
+// =============================================================================
+// 14. INTERACTIVE SCRATCHPAD / WHITEBOARD ENGINE
+// =============================================================================
+function openScratchpadModal() {
+  const modal = document.getElementById('modal-scratchpad');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+
+  requestAnimationFrame(() => {
+    initScratchpadCanvas();
+  });
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function closeScratchpadModal() {
+  document.getElementById('modal-scratchpad')?.classList.add('hidden');
+}
+
+function initScratchpadCanvas() {
+  scratchpadCanvas = document.getElementById('scratchpad-canvas');
+  if (!scratchpadCanvas) return;
+  const container = document.getElementById('scratchpad-canvas-container');
+  if (!container) return;
+
+  const rect = container.getBoundingClientRect();
+  scratchpadCanvas.width = Math.max(300, rect.width - 16);
+  scratchpadCanvas.height = Math.max(300, rect.height - 16);
+
+  scratchpadCtx = scratchpadCanvas.getContext('2d');
+  scratchpadCtx.lineCap = 'round';
+  scratchpadCtx.lineJoin = 'round';
+  scratchpadCtx.strokeStyle = scratchpadColor;
+  scratchpadCtx.lineWidth = scratchpadSize;
+
+  // Remove existing listeners to avoid duplicates
+  scratchpadCanvas.onmousedown = startScratchpadDraw;
+  scratchpadCanvas.onmousemove = drawScratchpad;
+  scratchpadCanvas.onmouseup = stopScratchpadDraw;
+  scratchpadCanvas.onmouseleave = stopScratchpadDraw;
+
+  scratchpadCanvas.ontouchstart = (e) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const mouseEvent = new MouseEvent("mousedown", {
+      clientX: touch.clientX,
+      clientY: touch.clientY
+    });
+    scratchpadCanvas.dispatchEvent(mouseEvent);
+  };
+  scratchpadCanvas.ontouchmove = (e) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const mouseEvent = new MouseEvent("mousemove", {
+      clientX: touch.clientX,
+      clientY: touch.clientY
+    });
+    scratchpadCanvas.dispatchEvent(mouseEvent);
+  };
+  scratchpadCanvas.ontouchend = (e) => {
+    e.preventDefault();
+    const mouseEvent = new MouseEvent("mouseup", {});
+    scratchpadCanvas.dispatchEvent(mouseEvent);
+  };
+}
+
+function startScratchpadDraw(e) {
+  if (!scratchpadCtx) return;
+  isScratchpadDrawing = true;
+  const rect = scratchpadCanvas.getBoundingClientRect();
+  scratchpadCtx.beginPath();
+  scratchpadCtx.moveTo(e.clientX - rect.left, e.clientY - rect.top);
+}
+
+function drawScratchpad(e) {
+  if (!isScratchpadDrawing || !scratchpadCtx) return;
+  const rect = scratchpadCanvas.getBoundingClientRect();
+  scratchpadCtx.strokeStyle = scratchpadColor;
+  scratchpadCtx.lineWidth = scratchpadSize;
+  scratchpadCtx.lineTo(e.clientX - rect.left, e.clientY - rect.top);
+  scratchpadCtx.stroke();
+}
+
+function stopScratchpadDraw() {
+  if (!isScratchpadDrawing) return;
+  isScratchpadDrawing = false;
+  scratchpadCtx?.closePath();
+}
+
+function setScratchpadColor(color) {
+  scratchpadColor = color;
+}
+
+function setScratchpadSize(size) {
+  scratchpadSize = parseInt(size, 10) || 4;
+}
+
+function clearScratchpadCanvas() {
+  if (!scratchpadCtx || !scratchpadCanvas) return;
+  scratchpadCtx.clearRect(0, 0, scratchpadCanvas.width, scratchpadCanvas.height);
+}
+
+// =============================================================================
+// 15. CUSTOM PRINTABLE & DUAL PDF EXPORT REVISION GENERATOR
+// =============================================================================
+let printConfig = {
+  subject: 'all',
+  chapter: 'all',
+  difficulty: 'all',
+  scope: 'all',
+  roughSpace: 'medium',
+  mode: 'questions', // 'questions' | 'solutions' | 'combined'
+  selectedDoubtIds: new Set(),
+  isDrawerOpen: false,
+  searchQuery: ''
+};
+
+function openPrintSheetModal() {
+  const modal = document.getElementById('modal-print-sheet');
+  if (!modal) return;
+
+  // Initialize chapter dropdown in print modal
+  populatePrintFilterChapters();
+
+  // If opened from batch selection, pre-select those doubts
+  if (isBatchMode && batchSelectedDoubtIds.size > 0) {
+    printConfig.selectedDoubtIds = new Set(batchSelectedDoubtIds);
+    const scopeSelect = document.getElementById('print-filter-scope');
+    if (scopeSelect) scopeSelect.value = 'batch';
+  } else {
+    // By default select all doubts
+    printConfig.selectedDoubtIds = new Set((AppState.doubts || []).map(d => d.id));
+    const scopeSelect = document.getElementById('print-filter-scope');
+    if (scopeSelect) scopeSelect.value = 'all';
+  }
+
+  modal.classList.remove('hidden');
+  updatePrintSelectedCountBadge();
+  renderPrintDoubtSelectorList();
+  renderPrintPreview();
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function batchPrintRevisionSheet() {
+  if (batchSelectedDoubtIds.size === 0) {
+    showToast('Select doubts to generate worksheet', 'info');
+    return;
+  }
+  openPrintSheetModal();
+}
+
+function closePrintSheetModal() {
+  document.getElementById('modal-print-sheet')?.classList.add('hidden');
+}
+
+function populatePrintFilterChapters() {
+  const select = document.getElementById('print-filter-chapter');
+  if (!select) return;
+
+  const currentSubj = document.getElementById('print-filter-subject')?.value || 'all';
+  select.innerHTML = '<option value="all">All Chapters</option>';
+
+  let chapters = [];
+  if (currentSubj === 'all') {
+    ['Physics', 'Chemistry', 'Mathematics'].forEach(s => {
+      chapters.push(...getAllChaptersForSubject(s));
+    });
+  } else {
+    chapters = getAllChaptersForSubject(currentSubj);
+  }
+
+  // Deduplicate
+  const uniqueChapters = Array.from(new Set(chapters));
+  uniqueChapters.forEach(ch => {
+    const opt = document.createElement('option');
+    opt.value = ch;
+    opt.textContent = ch;
+    select.appendChild(opt);
+  });
+}
+
+function onPrintFilterChanged() {
+  const subj = document.getElementById('print-filter-subject')?.value || 'all';
+  const chapterSelect = document.getElementById('print-filter-chapter');
+  const prevChapter = chapterSelect?.value;
+
+  populatePrintFilterChapters();
+  if (chapterSelect && prevChapter && Array.from(chapterSelect.options).some(o => o.value === prevChapter)) {
+    chapterSelect.value = prevChapter;
+  }
+
+  // Get doubts matching current filters and select them
+  const matchingDoubts = getFilteredDoubtsForPrint();
+  printConfig.selectedDoubtIds = new Set(matchingDoubts.map(d => d.id));
+
+  updatePrintSelectedCountBadge();
+  renderPrintDoubtSelectorList();
+  renderPrintPreview();
+}
+
+function getFilteredDoubtsForPrint() {
+  const subj = document.getElementById('print-filter-subject')?.value || 'all';
+  const chapter = document.getElementById('print-filter-chapter')?.value || 'all';
+  const diff = document.getElementById('print-filter-difficulty')?.value || 'all';
+  const scope = document.getElementById('print-filter-scope')?.value || 'all';
+
+  return (AppState.doubts || []).filter(d => {
+    if (subj !== 'all' && d.subject !== subj) return false;
+    if (chapter !== 'all' && d.chapter !== chapter) return false;
+    if (diff !== 'all' && d.difficulty !== diff) return false;
+
+    if (scope === 'starred' && !d.is_starred) return false;
+    if (scope === 'unmastered' && (d.mastery_level || 0) >= 3) return false;
+    if (scope === 'batch' && !batchSelectedDoubtIds.has(d.id)) return false;
+
+    return true;
+  });
+}
+
+function togglePrintSelectorDrawer() {
+  printConfig.isDrawerOpen = !printConfig.isDrawerOpen;
+  const pane = document.getElementById('modal-print-selector-pane');
+  const textEl = document.getElementById('print-toggle-drawer-text');
+  const icon = document.getElementById('print-drawer-icon');
+
+  if (printConfig.isDrawerOpen) {
+    pane?.classList.remove('hidden');
+    if (textEl) textEl.textContent = 'Hide Doubt Checklist';
+    if (icon) icon.setAttribute('data-lucide', 'chevron-up');
+    renderPrintDoubtSelectorList();
+  } else {
+    pane?.classList.add('hidden');
+    if (textEl) textEl.textContent = 'Select Specific Doubts (Granular)';
+    if (icon) icon.setAttribute('data-lucide', 'chevron-down');
+  }
+
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function renderPrintDoubtSelectorList() {
+  const container = document.getElementById('print-doubts-checklist');
+  if (!container) return;
+
+  const searchVal = document.getElementById('print-doubt-search')?.value?.trim().toLowerCase() || '';
+  const filtered = getFilteredDoubtsForPrint().filter(d => {
+    if (!searchVal) return true;
+    const titleMatch = (d.title || '').toLowerCase().includes(searchVal);
+    const chMatch = (d.chapter || '').toLowerCase().includes(searchVal);
+    const subMatch = (d.subject || '').toLowerCase().includes(searchVal);
+    const tagMatch = (d.custom_tags || []).some(t => t.toLowerCase().includes(searchVal));
+    return titleMatch || chMatch || subMatch || tagMatch;
+  });
+
+  if (filtered.length === 0) {
+    container.innerHTML = `
+      <div class="py-4 text-center text-slate-400 text-xs">
+        No matching doubts found.
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = filtered.map((d, idx) => {
+    const isChecked = printConfig.selectedDoubtIds.has(d.id);
+    let subjClass = "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300";
+    if (d.subject === 'Chemistry') subjClass = "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300";
+    if (d.subject === 'Mathematics') subjClass = "bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300";
+
+    return `
+      <label class="flex items-center justify-between p-2 hover:bg-slate-50 dark:hover:bg-[#252525] rounded-lg cursor-pointer transition text-xs">
+        <div class="flex items-center space-x-2.5 min-w-0 flex-1 mr-2">
+          <input 
+            type="checkbox" 
+            ${isChecked ? 'checked' : ''} 
+            onchange="togglePrintDoubtSelect('${d.id}')"
+            class="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 dark:border-[#3E3E3E]" 
+          />
+          <div class="truncate">
+            <div class="flex items-center space-x-1.5 mb-0.5">
+              <span class="px-1.5 py-0.2 rounded text-[9px] font-bold ${subjClass}">${d.subject || 'Physics'}</span>
+              <span class="text-[10px] text-slate-400 font-semibold truncate">${d.chapter || 'Topic'}</span>
+              <span class="text-[10px] text-slate-400 font-medium">&bull; ${d.difficulty || 'Medium'}</span>
+              ${d.is_starred ? '<span class="text-amber-500 text-[10px]">★</span>' : ''}
+            </div>
+            <p class="font-bold text-slate-800 dark:text-slate-200 truncate">${d.title || 'Untitled Doubt'}</p>
+          </div>
+        </div>
+
+        ${d.question_image_url ? `
+          <span class="text-[10px] font-semibold text-blue-600 dark:text-blue-400 flex items-center space-x-0.5 flex-shrink-0" title="Has attached diagram">
+            <i data-lucide="paperclip" class="w-3 h-3"></i>
+            <span>Photo</span>
+          </span>
+        ` : ''}
+      </label>
+    `;
+  }).join('');
+
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function togglePrintDoubtSelect(doubtId) {
+  if (printConfig.selectedDoubtIds.has(doubtId)) {
+    printConfig.selectedDoubtIds.delete(doubtId);
+  } else {
+    printConfig.selectedDoubtIds.add(doubtId);
+  }
+
+  updatePrintSelectedCountBadge();
+  renderPrintPreview();
+}
+
+function selectFilteredPrintDoubts(selectAll) {
+  const filtered = getFilteredDoubtsForPrint();
+  if (selectAll) {
+    filtered.forEach(d => printConfig.selectedDoubtIds.add(d.id));
+  } else {
+    filtered.forEach(d => printConfig.selectedDoubtIds.delete(d.id));
+  }
+
+  updatePrintSelectedCountBadge();
+  renderPrintDoubtSelectorList();
+  renderPrintPreview();
+}
+
+function selectStarredPrintDoubts() {
+  printConfig.selectedDoubtIds.clear();
+  (AppState.doubts || []).filter(d => d.is_starred).forEach(d => {
+    printConfig.selectedDoubtIds.add(d.id);
+  });
+
+  updatePrintSelectedCountBadge();
+  renderPrintDoubtSelectorList();
+  renderPrintPreview();
+}
+
+function updatePrintSelectedCountBadge() {
+  const badge = document.getElementById('print-selected-count-badge');
+  const count = printConfig.selectedDoubtIds.size;
+  if (badge) {
+    badge.textContent = `${count} ${count === 1 ? 'Doubt' : 'Doubts'} Selected`;
+  }
+}
+
+function switchPrintPreviewMode(mode) {
+  printConfig.mode = mode;
+
+  ['questions', 'solutions', 'combined'].forEach(m => {
+    const btn = document.getElementById(`print-mode-btn-${m}`);
+    if (btn) {
+      if (m === mode) {
+        btn.className = 'px-2.5 py-1 rounded-lg bg-white dark:bg-[#1E1E1E] text-blue-600 dark:text-blue-400 shadow-2xs font-bold';
+      } else {
+        btn.className = 'px-2.5 py-1 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-900 font-bold';
+      }
+    }
+  });
+
+  renderPrintPreview();
+}
+
+function renderPrintPreview() {
+  const container = document.getElementById('printable-worksheet-content');
+  if (!container) return;
+
+  const roughSpaceSetting = document.getElementById('print-filter-rough-space')?.value || 'medium';
+  const selectedDoubts = (AppState.doubts || []).filter(d => printConfig.selectedDoubtIds.has(d.id));
+
+  if (selectedDoubts.length === 0) {
+    container.innerHTML = `
+      <div class="text-center py-16 text-slate-400">
+        <div class="w-12 h-12 mx-auto rounded-2xl bg-slate-200 dark:bg-[#252525] flex items-center justify-center text-slate-500 mb-3">
+          <i data-lucide="file-question" class="w-6 h-6"></i>
+        </div>
+        <p class="font-bold text-sm text-slate-700 dark:text-slate-300">No Doubts Selected</p>
+        <p class="text-xs text-slate-400 mt-1">Check at least one doubt in the filter controls to preview and export PDF.</p>
+      </div>
+    `;
+    if (window.lucide) window.lucide.createIcons();
+    return;
+  }
+
+  const currentDate = new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' });
+
+  // 1. QUESTION PAPER ONLY MODE
+  if (printConfig.mode === 'questions') {
+    container.innerHTML = `
+      <!-- Exam Paper Header -->
+      <div class="border-b-2 border-slate-900 dark:border-white pb-4 mb-6 text-slate-900 dark:text-white">
+        <div class="flex items-start justify-between">
+          <div>
+            <h1 class="text-lg sm:text-xl font-black uppercase tracking-wider">JEE PRACTICE & REVISION WORKSHEET</h1>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Focus: JEE Main & Advanced &bull; Question Paper</p>
+          </div>
+          <div class="text-right text-xs space-y-0.5">
+            <p class="font-bold">Date: ${currentDate}</p>
+            <p class="text-slate-500 dark:text-slate-400">Total Questions: <strong>${selectedDoubts.length}</strong></p>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-4 pt-3 border-t border-dashed border-slate-300 dark:border-[#333] text-xs">
+          <div><span class="text-slate-400 font-semibold">Student Name:</span> ___________________</div>
+          <div><span class="text-slate-400 font-semibold">Roll No:</span> ____________</div>
+          <div><span class="text-slate-400 font-semibold">Marks Obtained:</span> _____ / ${selectedDoubts.length * 4}</div>
+        </div>
+      </div>
+
+      <!-- Question List -->
+      <div class="space-y-6">
+        ${selectedDoubts.map((d, i) => {
+          let roughHeightClass = "h-24";
+          if (roughSpaceSetting === 'large') roughHeightClass = "h-40";
+          if (roughSpaceSetting === 'none') roughHeightClass = "hidden";
+
+          return `
+            <div class="printable-question-item bg-white dark:bg-[#1E1E1E] p-4 sm:p-5 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] shadow-2xs space-y-3">
+              
+              <div class="flex items-center justify-between text-xs pb-2 border-b border-slate-100 dark:border-[#2A2A2A]">
+                <div class="flex items-center space-x-2">
+                  <span class="w-6 h-6 rounded-lg bg-blue-600 text-white font-bold text-xs flex items-center justify-center">Q${i + 1}</span>
+                  <span class="font-extrabold text-slate-900 dark:text-white">${d.subject || 'Physics'}</span>
+                  <span class="text-slate-400">&bull;</span>
+                  <span class="text-slate-600 dark:text-slate-400 font-medium">${d.chapter || 'Topic'}</span>
+                </div>
+                <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 dark:bg-[#2A2A2A] text-slate-700 dark:text-slate-300">[ +4, -1 ] &bull; ${d.difficulty || 'Medium'}</span>
+              </div>
+
+              <!-- Question Title / Statement -->
+              <h3 class="text-sm sm:text-base font-bold text-slate-900 dark:text-white leading-relaxed">
+                ${d.title || 'Untitled Problem'}
+              </h3>
+
+              <!-- Question Image Diagram (if attached) -->
+              ${d.question_image_url ? `
+                <div class="p-2 bg-slate-50 dark:bg-[#141414] rounded-xl border border-slate-200 dark:border-[#2E2E2E] inline-block max-w-full">
+                  <img src="${d.question_image_url}" alt="Question Diagram" class="max-h-64 rounded-lg object-contain" />
+                </div>
+              ` : ''}
+
+              <!-- Space for Student Rough Work in Print -->
+              ${roughSpaceSetting !== 'none' ? `
+                <div class="${roughHeightClass} border border-dashed border-slate-300 dark:border-[#3E3E3E] rounded-xl bg-slate-50/50 dark:bg-[#151515] p-2 flex items-start justify-between text-slate-400 text-[10px] font-mono">
+                  <span>[ Space for Rough Work & Calculations ]</span>
+                  <span>Answer: [ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ]</span>
+                </div>
+              ` : ''}
+
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  // 2. ANSWER KEY & SOLUTIONS ONLY MODE
+  else if (printConfig.mode === 'solutions') {
+    container.innerHTML = `
+      <!-- Solutions Booklet Header -->
+      <div class="border-b-2 border-emerald-600 pb-4 mb-6 text-slate-900 dark:text-white">
+        <div class="flex items-start justify-between">
+          <div>
+            <h1 class="text-lg sm:text-xl font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400">ANSWER KEY & STEP-BY-STEP SOLUTIONS</h1>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Comprehensive Explanations & Key Concepts Guide</p>
+          </div>
+          <div class="text-right text-xs space-y-0.5">
+            <p class="font-bold">Date: ${currentDate}</p>
+            <p class="text-slate-500 dark:text-slate-400">Total Solutions: <strong>${selectedDoubts.length}</strong></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Answer Key Summary Table -->
+      <div class="bg-emerald-50 dark:bg-emerald-950/40 p-4 rounded-2xl border border-emerald-200 dark:border-emerald-900/60 mb-6">
+        <h3 class="text-xs font-bold text-emerald-900 dark:text-emerald-300 mb-2.5 uppercase tracking-wider flex items-center space-x-1.5">
+          <i data-lucide="key" class="w-4 h-4"></i>
+          <span>Quick Answer Key Reference</span>
+        </h3>
+        
+        <div class="grid grid-cols-4 sm:grid-cols-8 gap-2 text-xs">
+          ${selectedDoubts.map((d, i) => `
+            <div class="bg-white dark:bg-[#1E1E1E] p-2 rounded-xl border border-emerald-100 dark:border-emerald-900/40 text-center">
+              <span class="text-[10px] font-bold text-slate-400 block">Q${i + 1}</span>
+              <span class="font-black text-emerald-700 dark:text-emerald-300 text-xs truncate block">${d.correct_answer || (d.difficulty === 'Easy' ? 'Opt (B)' : 'Verified')}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <!-- Step-by-Step Detailed Solutions -->
+      <div class="space-y-6">
+        ${selectedDoubts.map((d, i) => `
+          <div class="printable-solution-item bg-white dark:bg-[#1E1E1E] p-4 sm:p-5 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] shadow-2xs space-y-3">
+            
+            <div class="flex items-center justify-between text-xs pb-2 border-b border-slate-100 dark:border-[#2A2A2A]">
+              <div class="flex items-center space-x-2">
+                <span class="w-6 h-6 rounded-lg bg-emerald-600 text-white font-bold text-xs flex items-center justify-center">S${i + 1}</span>
+                <span class="font-bold text-slate-900 dark:text-white">Solution for Q${i + 1}: ${d.title || 'Problem'}</span>
+              </div>
+              <span class="text-[10px] text-slate-400 font-semibold">${d.subject} &bull; ${d.chapter}</span>
+            </div>
+
+            <!-- Solution Diagram / Work (if attached) -->
+            ${d.solution_image_url ? `
+              <div class="p-2 bg-slate-50 dark:bg-[#141414] rounded-xl border border-slate-200 dark:border-[#2E2E2E] inline-block max-w-full">
+                <span class="text-[10px] font-bold text-emerald-600 block mb-1">Handwritten / Diagrammatic Solution:</span>
+                <img src="${d.solution_image_url}" alt="Solution Diagram" class="max-h-64 rounded-lg object-contain" />
+              </div>
+            ` : ''}
+
+            <!-- Solution Detailed Text / Derivations -->
+            ${d.solution_text && d.solution_text.trim() ? `
+              <div class="p-3.5 bg-slate-50 dark:bg-[#161616] rounded-xl border border-slate-200 dark:border-[#2A2A2A] text-xs leading-relaxed text-slate-800 dark:text-slate-200 whitespace-pre-wrap font-sans">
+                ${d.solution_text}
+              </div>
+            ` : ''}
+
+            ${!d.solution_image_url && (!d.solution_text || !d.solution_text.trim()) ? `
+              <p class="text-xs text-slate-400 italic">Reference solution was not saved as text; please consult standard NCERT/PYQ module for ${d.chapter}.</p>
+            ` : ''}
+
+            <!-- Key Formula / Concept Box -->
+            ${d.hint_text && d.hint_text.trim() ? `
+              <div class="p-2.5 bg-purple-50 dark:bg-purple-950/40 rounded-xl border border-purple-200 dark:border-purple-900/60 text-xs text-purple-900 dark:text-purple-300 flex items-center space-x-2">
+                <i data-lucide="lightbulb" class="w-4 h-4 text-purple-600 flex-shrink-0"></i>
+                <span><strong>Core Concept / Formula:</strong> ${d.hint_text}</span>
+              </div>
+            ` : ''}
+
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  // 3. COMBINED PROBLEM & SOLUTION SHEET MODE
+  else {
+    container.innerHTML = `
+      <div class="border-b-2 border-slate-900 dark:border-white pb-4 mb-6 text-slate-900 dark:text-white">
+        <div class="flex items-start justify-between">
+          <div>
+            <h1 class="text-lg sm:text-xl font-black uppercase tracking-wider">JEE COMPLETE REVISION WORKSHEET</h1>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Combined Questions with Detailed Solutions</p>
+          </div>
+          <div class="text-right text-xs space-y-0.5">
+            <p class="font-bold">Date: ${currentDate}</p>
+            <p class="text-slate-500 dark:text-slate-400">Total Doubts: <strong>${selectedDoubts.length}</strong></p>
+          </div>
+        </div>
+      </div>
+
+      <div class="space-y-6">
+        ${selectedDoubts.map((d, i) => `
+          <div class="printable-question-item bg-white dark:bg-[#1E1E1E] p-4 sm:p-5 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] space-y-3">
+            <div class="flex items-center justify-between text-xs pb-2 border-b border-slate-100 dark:border-[#2A2A2A]">
+              <span class="font-bold text-blue-600 dark:text-blue-400">Q${i + 1}. ${d.subject} &bull; ${d.chapter}</span>
+              <span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-[#2A2A2A] text-slate-700 dark:text-slate-300">${d.difficulty}</span>
+            </div>
+
+            <h3 class="text-sm font-bold text-slate-900 dark:text-white leading-relaxed">${d.title}</h3>
+
+            ${d.question_image_url ? `
+              <div class="p-2 bg-slate-50 dark:bg-[#141414] rounded-xl border border-slate-200 dark:border-[#2E2E2E] inline-block">
+                <img src="${d.question_image_url}" alt="Question Image" class="max-h-56 rounded-lg object-contain" />
+              </div>
+            ` : ''}
+
+            <!-- Solution Section -->
+            <div class="p-3 bg-emerald-50/70 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-900/60 space-y-2 text-xs">
+              <span class="font-bold text-emerald-900 dark:text-emerald-300 flex items-center space-x-1">
+                <i data-lucide="check-circle" class="w-3.5 h-3.5"></i>
+                <span>Solution & Notes:</span>
+              </span>
+
+              ${d.solution_image_url ? `
+                <img src="${d.solution_image_url}" alt="Solution Image" class="max-h-56 rounded-lg object-contain" />
+              ` : ''}
+
+              ${d.solution_text ? `<p class="text-slate-800 dark:text-slate-200 font-sans whitespace-pre-wrap">${d.solution_text}</p>` : ''}
+              ${d.hint_text ? `<p class="text-purple-700 dark:text-purple-300 text-[11px]"><strong>Formula:</strong> ${d.hint_text}</p>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  // Trigger KaTeX math equation rendering on the generated worksheet
+  if (window.renderMathInElement) {
+    try {
+      window.renderMathInElement(container, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "$", right: "$", display: false }
+        ]
+      });
+    } catch (err) {
+      console.warn("KaTeX render error", err);
+    }
+  }
+
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function printQuestionPaper() {
+  switchPrintPreviewMode('questions');
+  setTimeout(() => {
+    window.print();
+  }, 150);
+}
+
+function printSolutionsPaper() {
+  switchPrintPreviewMode('solutions');
+  setTimeout(() => {
+    window.print();
+  }, 150);
+}
+
+function printCombinedPaper() {
+  switchPrintPreviewMode('combined');
+  setTimeout(() => {
+    window.print();
+  }, 150);
+}
+
+function exportDualPdfSequence() {
+  // 1. First print questions
+  printQuestionPaper();
+  showToast('📄 Step 1: Save Questions PDF in print dialog. Then click "Solutions PDF" to save Answer Key!', 'info');
+}
+
+// =============================================================================
+// 16. BATCH ACTIONS & SELECTION ENGINE (VAULT)
+// =============================================================================
+function toggleBatchSelectMode(force) {
+  if (typeof force === 'boolean') {
+    isBatchMode = force;
+  } else {
+    isBatchMode = !isBatchMode;
+  }
+
+  if (!isBatchMode) {
+    batchSelectedDoubtIds.clear();
+  }
+
+  const bar = document.getElementById('vault-batch-bar');
+  if (bar) {
+    if (isBatchMode) bar.classList.remove('hidden');
+    else bar.classList.add('hidden');
+  }
+
+  updateBatchBar();
+  renderVault();
+}
+
+function toggleBatchMode() {
+  toggleBatchSelectMode();
+}
+
+function toggleSelectAllBatch(force) {
+  const allDoubts = AppState.doubts || [];
+  if (typeof force === 'boolean') {
+    if (force) {
+      allDoubts.forEach(d => batchSelectedDoubtIds.add(d.id));
+    } else {
+      batchSelectedDoubtIds.clear();
+    }
+  } else {
+    if (batchSelectedDoubtIds.size === allDoubts.length) {
+      batchSelectedDoubtIds.clear();
+    } else {
+      allDoubts.forEach(d => batchSelectedDoubtIds.add(d.id));
+    }
+  }
+
+  const masterCheckbox = document.getElementById('batch-select-all-checkbox');
+  if (masterCheckbox) {
+    masterCheckbox.checked = batchSelectedDoubtIds.size === allDoubts.length && allDoubts.length > 0;
+  }
+
+  updateBatchBar();
+  renderVault();
+}
+
+function toggleBatchSelectDoubt(doubtId) {
+  if (batchSelectedDoubtIds.has(doubtId)) {
+    batchSelectedDoubtIds.delete(doubtId);
+  } else {
+    batchSelectedDoubtIds.add(doubtId);
+  }
+
+  const masterCheckbox = document.getElementById('batch-select-all-checkbox');
+  if (masterCheckbox) {
+    masterCheckbox.checked = batchSelectedDoubtIds.size === (AppState.doubts || []).length;
+  }
+
+  updateBatchBar();
+  renderVault();
+}
+
+function updateBatchBar() {
+  const countEl = document.getElementById('batch-selected-count');
+  if (countEl) {
+    countEl.textContent = `${batchSelectedDoubtIds.size} Selected`;
+  }
+}
+
+function openBatchMoveModal() {
+  if (batchSelectedDoubtIds.size === 0) {
+    showToast('Select at least one doubt first', 'info');
+    return;
+  }
+  const select = document.getElementById('batch-move-notebook-select');
+  if (select) {
+    select.innerHTML = `
+      <option value="">Remove from Notebook (General Vault)</option>
+      ${(AppState.notebooks || []).map(nb => `<option value="${nb.id}">${nb.name} (${nb.subject || 'General'})</option>`).join('')}
+    `;
+  }
+  document.getElementById('modal-batch-move')?.classList.remove('hidden');
+}
+
+function closeBatchMoveModal() {
+  document.getElementById('modal-batch-move')?.classList.add('hidden');
+}
+
+function applyBatchMoveToNotebook() {
+  const notebookId = document.getElementById('batch-move-notebook-select')?.value || null;
+  AppState.doubts.forEach(d => {
+    if (batchSelectedDoubtIds.has(d.id)) {
+      d.notebook_id = notebookId;
+    }
+  });
+
+  saveToStorage(STORAGE_KEYS.DOUBTS, AppState.doubts);
+  closeBatchMoveModal();
+  toggleBatchSelectMode(false);
+  renderVault();
+  renderNotebooksList();
+  showToast('Moved selected doubts successfully!', 'success');
+}
+
+function openBatchTagModal() {
+  if (batchSelectedDoubtIds.size === 0) {
+    showToast('Select at least one doubt first', 'info');
+    return;
+  }
+  document.getElementById('modal-batch-tag')?.classList.remove('hidden');
+}
+
+function closeBatchTagModal() {
+  document.getElementById('modal-batch-tag')?.classList.add('hidden');
+}
+
+function applyBatchAddTag() {
+  const tagInput = document.getElementById('batch-tag-input')?.value?.trim();
+  if (!tagInput) return;
+
+  const formattedTag = tagInput.startsWith('#') ? tagInput : `#${tagInput}`;
+
+  AppState.doubts.forEach(d => {
+    if (batchSelectedDoubtIds.has(d.id)) {
+      if (!d.custom_tags) d.custom_tags = [];
+      if (!d.custom_tags.includes(formattedTag)) {
+        d.custom_tags.push(formattedTag);
+      }
+    }
+  });
+
+  saveToStorage(STORAGE_KEYS.DOUBTS, AppState.doubts);
+  closeBatchTagModal();
+  toggleBatchSelectMode(false);
+  renderVault();
+  showToast(`Added tag "${formattedTag}" to selected doubts`, 'success');
+}
+
+function batchToggleMastered() {
+  batchMarkMastered();
+}
+
+function batchMarkMastered() {
+  if (batchSelectedDoubtIds.size === 0) {
+    showToast('Select at least one doubt first', 'info');
+    return;
+  }
+
+  AppState.doubts.forEach(d => {
+    if (batchSelectedDoubtIds.has(d.id)) {
+      d.mastery_level = 3;
+      d.is_resolved = true;
+    }
+  });
+
+  saveToStorage(STORAGE_KEYS.DOUBTS, AppState.doubts);
+  toggleBatchSelectMode(false);
+  renderVault();
+  updateHeaderMetrics();
+  showToast('Marked selected doubts as Mastered (Level 3)! 🎉', 'success');
+}
+
+function confirmBatchDelete() {
+  batchDeleteDoubts();
+}
+
+function batchDeleteDoubts() {
+  if (batchSelectedDoubtIds.size === 0) {
+    showToast('Select at least one doubt first', 'info');
+    return;
+  }
+
+  if (!confirm(`Delete ${batchSelectedDoubtIds.size} selected doubts permanently?`)) return;
+
+  AppState.doubts = AppState.doubts.filter(d => !batchSelectedDoubtIds.has(d.id));
+  saveToStorage(STORAGE_KEYS.DOUBTS, AppState.doubts);
+
+  toggleBatchSelectMode(false);
+  renderVault();
+  updateHeaderMetrics();
+  showToast('Deleted selected doubts', 'info');
+}
+
+// =============================================================================
+// 17. LIGHTBOX IMAGE VIEWER WITH ZOOM & ROTATE
+// =============================================================================
+let currentLightboxZoom = 1;
+
+function openImageLightbox(src, title = 'Question Attachment') {
+  const modal = document.getElementById('modal-image-lightbox');
+  const img = document.getElementById('lightbox-image');
+  const titleEl = document.getElementById('lightbox-title');
+  if (!modal || !img) return;
+
+  currentLightboxZoom = 1;
+  img.src = src;
+  img.style.transform = `scale(${currentLightboxZoom})`;
+  if (titleEl) titleEl.textContent = title;
+
+  modal.classList.remove('hidden');
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function closeLightboxModal() {
+  document.getElementById('modal-image-lightbox')?.classList.add('hidden');
+}
+
+function zoomLightboxImage(delta) {
+  const img = document.getElementById('lightbox-image');
+  if (!img) return;
+  currentLightboxZoom = Math.max(0.5, Math.min(3.5, currentLightboxZoom + delta));
+  img.style.transform = `scale(${currentLightboxZoom})`;
+}
+
+function resetLightboxZoom() {
+  const img = document.getElementById('lightbox-image');
+  if (!img) return;
+  currentLightboxZoom = 1;
+  img.style.transform = `scale(${currentLightboxZoom})`;
+}
+
+// =============================================================================
+// 18. SCRATCHPAD TOGGLER & GLOBAL ALIASES
+// =============================================================================
+function toggleScratchpad() {
+  const modal = document.getElementById('modal-scratchpad');
+  if (modal?.classList.contains('hidden')) {
+    openScratchpadModal();
+  } else {
+    closeScratchpadModal();
+  }
+}
+
+// =============================================================================
+// 19. QUIZ / TEST GENERATOR PRESETS & CHAPTER MODALS
+// =============================================================================
+let generatorSelectedChapters = {
+  test: new Set(),
+  practice: new Set()
+};
+
+function applyExamPreset(preset) {
+  const countSelect = document.getElementById('test-count-select');
+  const timerSelect = document.getElementById('test-timer-select');
+  const nameInput = document.getElementById('test-name-input');
+
+  const phyCb = document.getElementById('test-gen-subj-phy');
+  const chemCb = document.getElementById('test-gen-subj-chem');
+  const mathCb = document.getElementById('test-gen-subj-math');
+
+  if (preset === 'full_mock') {
+    if (phyCb) phyCb.checked = true;
+    if (chemCb) chemCb.checked = true;
+    if (mathCb) mathCb.checked = true;
+    if (countSelect) countSelect.value = '30';
+    if (timerSelect) timerSelect.value = '60';
+    if (nameInput) nameInput.value = 'JEE Full Syllabus Mock Drill';
+  } else if (preset === 'phy_drill') {
+    if (phyCb) phyCb.checked = true;
+    if (chemCb) chemCb.checked = false;
+    if (mathCb) mathCb.checked = false;
+    if (countSelect) countSelect.value = '10';
+    if (timerSelect) timerSelect.value = '20';
+    if (nameInput) nameInput.value = 'Physics Mastery Sprint';
+  } else if (preset === 'chem_drill') {
+    if (phyCb) phyCb.checked = false;
+    if (chemCb) chemCb.checked = true;
+    if (mathCb) mathCb.checked = false;
+    if (countSelect) countSelect.value = '10';
+    if (timerSelect) timerSelect.value = '15';
+    if (nameInput) nameInput.value = 'Chemistry Rapid Recall Test';
+  } else if (preset === 'math_drill') {
+    if (phyCb) phyCb.checked = false;
+    if (chemCb) chemCb.checked = false;
+    if (mathCb) mathCb.checked = true;
+    if (countSelect) countSelect.value = '10';
+    if (timerSelect) timerSelect.value = '30';
+    if (nameInput) nameInput.value = 'Mathematics Problem Sprint';
+  } else if (preset === 'weak_spots') {
+    if (phyCb) phyCb.checked = true;
+    if (chemCb) chemCb.checked = true;
+    if (mathCb) mathCb.checked = true;
+    if (countSelect) countSelect.value = '15';
+    if (timerSelect) timerSelect.value = '30';
+    if (nameInput) nameInput.value = 'Weak Area Diagnosis Drill';
+  }
+
+  onGeneratorFilterChange('test');
+}
+
+function toggleAllSubjects(subTab) {
+  const phyCb = document.getElementById(`${subTab}-gen-subj-phy`);
+  const chemCb = document.getElementById(`${subTab}-gen-subj-chem`);
+  const mathCb = document.getElementById(`${subTab}-gen-subj-math`);
+
+  const allChecked = phyCb?.checked && chemCb?.checked && mathCb?.checked;
+  const nextState = !allChecked;
+
+  if (phyCb) phyCb.checked = nextState;
+  if (chemCb) chemCb.checked = nextState;
+  if (mathCb) mathCb.checked = nextState;
+
+  onGeneratorFilterChange(subTab);
+}
+
+function onGeneratorFilterChange(subTab) {
+  const phyCb = document.getElementById(`${subTab}-gen-subj-phy`);
+  const chemCb = document.getElementById(`${subTab}-gen-subj-chem`);
+  const mathCb = document.getElementById(`${subTab}-gen-subj-math`);
+
+  const selectedSubjects = [];
+  if (phyCb?.checked) selectedSubjects.push('Physics');
+  if (chemCb?.checked) selectedSubjects.push('Chemistry');
+  if (mathCb?.checked) selectedSubjects.push('Mathematics');
+
+  const doubts = (AppState.doubts || []).filter(d => {
+    if (selectedSubjects.length > 0 && !selectedSubjects.includes(d.subject)) return false;
+    if (generatorSelectedChapters[subTab]?.size > 0 && !generatorSelectedChapters[subTab].has(d.chapter)) return false;
+    return true;
+  });
+
+  const bannerCount = document.getElementById(`${subTab}-matching-count`);
+  if (bannerCount) bannerCount.textContent = `${doubts.length} Doubts Available`;
+}
+
+function openChapterSelectModal(subTab = 'test') {
+  const modal = document.getElementById('modal-select-chapters');
+  if (!modal) return;
+
+  renderChapterModalList(subTab);
+  modal.classList.remove('hidden');
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function closeChapterSelectModal() {
+  document.getElementById('modal-select-chapters')?.classList.add('hidden');
+}
+
+function renderChapterModalList(subTab = 'test') {
+  const container = document.getElementById('chapter-select-modal-list');
+  if (!container) return;
+
+  const searchQ = document.getElementById('chapter-select-search')?.value?.trim().toLowerCase() || '';
+
+  const subjects = ['Physics', 'Chemistry', 'Mathematics'];
+  let html = '';
+
+  subjects.forEach(subj => {
+    const chapters = getAllChaptersForSubject(subj).filter(ch => {
+      if (!searchQ) return true;
+      return ch.toLowerCase().includes(searchQ) || subj.toLowerCase().includes(searchQ);
+    });
+
+    if (chapters.length === 0) return;
+
+    html += `
+      <div class="space-y-1 pt-2">
+        <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wider px-1">${subj}</h4>
+        <div class="space-y-1">
+          ${chapters.map(ch => {
+            const isChecked = generatorSelectedChapters[subTab]?.has(ch);
+            const doubtCount = (AppState.doubts || []).filter(d => d.chapter === ch).length;
+
+            return `
+              <label class="flex items-center justify-between p-2 rounded-xl bg-slate-50 dark:bg-[#1A1A1A] hover:bg-slate-100 dark:hover:bg-[#252525] cursor-pointer text-xs transition">
+                <div class="flex items-center space-x-2.5 min-w-0 flex-1 mr-2">
+                  <input 
+                    type="checkbox" 
+                    value="${ch}" 
+                    ${isChecked ? 'checked' : ''}
+                    class="chapter-modal-cb w-4 h-4 rounded text-purple-600 focus:ring-purple-500" 
+                  />
+                  <span class="font-bold text-slate-800 dark:text-slate-200 truncate">${ch}</span>
+                </div>
+                ${doubtCount > 0 ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 flex-shrink-0">${doubtCount} Qs</span>` : ''}
+              </label>
+            `;
+          }).join('')}
+        </div>
+      </div>
+    `;
+  });
+
+  container.innerHTML = html || '<div class="py-6 text-center text-slate-400 text-xs">No chapters matching search.</div>';
+}
+
+function filterChapterModalList() {
+  renderChapterModalList(AppState.quizSubTab === 'practice' ? 'practice' : 'test');
+}
+
+function selectAllChaptersInModal() {
+  document.querySelectorAll('.chapter-modal-cb').forEach(cb => { cb.checked = true; });
+}
+
+function clearAllChaptersInModal() {
+  document.querySelectorAll('.chapter-modal-cb').forEach(cb => { cb.checked = false; });
+}
+
+function selectWeakChaptersInModal() {
+  // Find chapters with lowest mastery or most doubts
+  const weakChapters = new Set();
+  (AppState.doubts || []).filter(d => (d.mastery_level || 0) < 2).forEach(d => {
+    if (d.chapter) weakChapters.add(d.chapter);
+  });
+
+  document.querySelectorAll('.chapter-modal-cb').forEach(cb => {
+    cb.checked = weakChapters.has(cb.value);
+  });
+}
+
+function applyChapterSelectionFromModal() {
+  const subTab = AppState.quizSubTab === 'practice' ? 'practice' : 'test';
+  if (!generatorSelectedChapters[subTab]) generatorSelectedChapters[subTab] = new Set();
+  generatorSelectedChapters[subTab].clear();
+
+  document.querySelectorAll('.chapter-modal-cb:checked').forEach(cb => {
+    generatorSelectedChapters[subTab].add(cb.value);
+  });
+
+  const countBadge = document.getElementById(`${subTab}-selected-chapters-badge`);
+  if (countBadge) {
+    const sz = generatorSelectedChapters[subTab].size;
+    countBadge.textContent = sz === 0 ? 'All Chapters Included' : `${sz} Chapters Selected`;
+  }
+
+  closeChapterSelectModal();
+  onGeneratorFilterChange(subTab);
+  showToast('Chapter scope updated!', 'success');
+}
+
+function setCustomTestCount(count) {
+  const countSelect = document.getElementById('test-count-select');
+  if (countSelect) {
+    countSelect.value = String(count);
+  }
+}
+
+function startCustomTestSession() {
+  startTestSession();
+}
+
+function toggleTestPaletteDrawer() {
+  const drawer = document.getElementById('test-palette-drawer');
+  drawer?.classList.toggle('hidden');
+}
+
+function selectTestOption(optionLetter) {
+  const input = document.getElementById('test-user-answer');
+  if (input) {
+    input.value = optionLetter;
+  }
+  saveCurrentTestAnswer();
+}
+
+function clearTestCurrentResponse() {
+  const input = document.getElementById('test-user-answer');
+  if (input) input.value = '';
+  saveCurrentTestAnswer();
+}
+
+function markReviewAndNextTest() {
+  const q = AppState.testSession.questions[AppState.testSession.currentIndex];
+  if (q) q.isMarkedForReview = true;
+  nextTestQuestion();
+}
+
+function toggleTestHint() {
+  const hintContent = document.getElementById('test-hint-content');
+  hintContent?.classList.toggle('hidden');
+}
+
+function startQuizForActiveNotebook() {
+  if (!AppState.activeNotebookFilterId) return;
+  switchTab('quiz');
+  switchQuizSubTab('test');
+  const scopeSelect = document.getElementById('test-scope-select');
+  if (scopeSelect) {
+    scopeSelect.value = 'notebook';
+    handleTestScopeChange();
+  }
+  const nbPicker = document.getElementById('test-notebook-picker');
+  if (nbPicker) nbPicker.value = AppState.activeNotebookFilterId;
+  startTestSession();
+}
+
+// =============================================================================
+// 20. SRS / FLASHCARDS REVISION DECK ENGINE
+// =============================================================================
+let flashcardDeck = [];
+let currentFlashcardIndex = 0;
+let isFlashcardFlipped = false;
+let flashcardFilterSubj = 'all';
+
+function startSrsFlashcardsDeck() {
+  switchTab('quiz');
+  switchQuizSubTab('flashcards');
+  updateFlashcardPoolCount();
+}
+
+function setFlashcardSubjectFilter(sub) {
+  flashcardFilterSubj = sub;
+  ['all', 'Physics', 'Chemistry', 'Mathematics'].forEach(s => {
+    const btn = document.getElementById(`fc-filter-btn-${s}`);
+    if (btn) {
+      if (s === sub) {
+        btn.className = 'px-3 py-1.5 rounded-xl font-bold bg-purple-600 text-white text-xs shadow-xs';
+      } else {
+        btn.className = 'px-3 py-1.5 rounded-xl font-bold bg-slate-100 dark:bg-[#252525] text-slate-600 dark:text-slate-400 text-xs';
+      }
+    }
+  });
+  updateFlashcardPoolCount();
+}
+
+function updateFlashcardPoolCount() {
+  const pool = getFlashcardPool();
+  const countEl = document.getElementById('flashcard-pool-count');
+  if (countEl) countEl.textContent = `${pool.length} Cards Ready`;
+}
+
+function getFlashcardPool() {
+  return (AppState.doubts || []).filter(d => {
+    if (flashcardFilterSubj !== 'all' && d.subject !== flashcardFilterSubj) return false;
+    return true;
+  });
+}
+
+function startFlashcardSession() {
+  const pool = getFlashcardPool();
+  if (pool.length === 0) {
+    showToast('No doubts available in selected subject deck!', 'error');
+    return;
+  }
+
+  // Shuffle flashcard deck
+  flashcardDeck = [...pool].sort(() => Math.random() - 0.5);
+  currentFlashcardIndex = 0;
+  isFlashcardFlipped = false;
+
+  document.getElementById('flashcard-setup-card')?.classList.add('hidden');
+  document.getElementById('flashcard-active-card')?.classList.remove('hidden');
+  renderCurrentFlashcard();
+}
+
+function renderCurrentFlashcard() {
+  const card = flashcardDeck[currentFlashcardIndex];
+  if (!card) {
+    exitFlashcardSession();
+    return;
+  }
+
+  isFlashcardFlipped = false;
+  const flipCard = document.getElementById('srs-flip-card');
+  flipCard?.classList.remove('flipped');
+
+  // Front Elements
+  const progText = document.getElementById('fc-prog-text');
+  const subjBadge = document.getElementById('fc-front-subject');
+  const chBadge = document.getElementById('fc-front-chapter');
+  const diffBadge = document.getElementById('fc-front-diff');
+  const titleEl = document.getElementById('fc-front-title');
+  const imgFront = document.getElementById('fc-front-img');
+  const imgBox = document.getElementById('fc-front-img-box');
+
+  if (progText) progText.textContent = `Card ${currentFlashcardIndex + 1} of ${flashcardDeck.length}`;
+  if (subjBadge) subjBadge.textContent = card.subject || 'Physics';
+  if (chBadge) chBadge.textContent = card.chapter || 'Topic';
+  if (diffBadge) diffBadge.textContent = card.difficulty || 'Medium';
+  if (titleEl) titleEl.textContent = card.title || 'Untitled Problem';
+
+  if (card.question_image_url) {
+    if (imgFront) imgFront.src = card.question_image_url;
+    imgBox?.classList.remove('hidden');
+  } else {
+    imgBox?.classList.add('hidden');
+  }
+
+  // Back Elements
+  const solImg = document.getElementById('fc-back-img');
+  const solImgBox = document.getElementById('fc-back-img-box');
+  const solText = document.getElementById('fc-back-text');
+  const hintText = document.getElementById('fc-back-hint');
+  const hintBox = document.getElementById('fc-back-hint-box');
+
+  if (card.solution_image_url) {
+    if (solImg) solImg.src = card.solution_image_url;
+    solImgBox?.classList.remove('hidden');
+  } else {
+    solImgBox?.classList.add('hidden');
+  }
+
+  if (solText) {
+    solText.textContent = card.solution_text || (card.solution_image_url ? '' : 'No handwritten explanation saved.');
+  }
+
+  if (card.hint_text && card.hint_text.trim()) {
+    if (hintText) hintText.textContent = card.hint_text;
+    hintBox?.classList.remove('hidden');
+  } else {
+    hintBox?.classList.add('hidden');
+  }
+
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function toggleFlashcardFlip() {
+  const flipCard = document.getElementById('srs-flip-card');
+  if (!flipCard) return;
+  isFlashcardFlipped = !isFlashcardFlipped;
+  flipCard.classList.toggle('flipped', isFlashcardFlipped);
+}
+
+function rateFlashcard(qualityRating) {
+  const card = flashcardDeck[currentFlashcardIndex];
+  if (card) {
+    // SM-2 Spaced Repetition Logic update
+    const currentMastery = card.mastery_level || 0;
+    if (qualityRating >= 4) {
+      card.mastery_level = Math.min(3, currentMastery + 1);
+    } else if (qualityRating <= 2) {
+      card.mastery_level = Math.max(0, currentMastery - 1);
+    }
+    card.last_reviewed_at = new Date().toISOString();
+    saveToStorage(STORAGE_KEYS.DOUBTS, AppState.doubts);
+  }
+
+  currentFlashcardIndex++;
+  if (currentFlashcardIndex >= flashcardDeck.length) {
+    showToast('🎉 Great job! Completed the Flashcard Revision Deck!', 'success');
+    exitFlashcardSession();
+  } else {
+    renderCurrentFlashcard();
+  }
+}
+
+function exitFlashcardSession() {
+  document.getElementById('flashcard-active-card')?.classList.add('hidden');
+  document.getElementById('flashcard-setup-card')?.classList.remove('hidden');
+}
+

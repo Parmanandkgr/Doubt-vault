@@ -30,6 +30,11 @@
   <!-- Chart.js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
+  <!-- KaTeX for LaTeX Math & Chemical Equation Rendering -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+
   <!-- Lucide Icons CDN -->
   <script src="https://unpkg.com/lucide@latest"></script>
 
@@ -41,6 +46,72 @@
     .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
     .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
     .dark .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; }
+    
+    /* 3D Flashcard Flip Effect */
+    .flip-card { perspective: 1000px; }
+    .flip-card-inner { position: relative; width: 100%; transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1); transform-style: preserve-3d; }
+    .flip-card.flipped .flip-card-inner { transform: rotateY(180deg); }
+    .flip-card-front, .flip-card-back { backface-visibility: hidden; -webkit-backface-visibility: hidden; width: 100%; }
+    .flip-card-back { transform: rotateY(180deg); position: absolute; top: 0; left: 0; height: 100%; }
+
+    /* Print Revision Sheet & Dual PDF Export Optimizations */
+    @media print {
+      body {
+        background: white !important;
+        color: black !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        font-size: 12pt !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      header, nav, #toast-container, .no-print, button, input[type="file"], .tab-btn, #scratchpad-floating-btn {
+        display: none !important;
+      }
+      #modal-print-sheet {
+        position: static !important;
+        inset: auto !important;
+        background: white !important;
+        display: block !important;
+        overflow: visible !important;
+        z-index: 99999 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+      }
+      #modal-print-sheet > div {
+        min-height: auto !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: block !important;
+      }
+      #modal-print-sheet > div > div {
+        max-width: 100% !important;
+        border: none !important;
+        box-shadow: none !important;
+        border-radius: 0 !important;
+        background: white !important;
+      }
+      #modal-print-sheet-header, #modal-print-controls-bar, #modal-print-selector-pane, #modal-print-mode-tabs {
+        display: none !important;
+      }
+      #printable-worksheet-content {
+        padding: 10mm 15mm !important;
+        margin: 0 !important;
+        background: white !important;
+        overflow: visible !important;
+      }
+      .printable-question-item, .printable-solution-item {
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+        margin-bottom: 20px !important;
+        border-bottom: 1px dashed #cbd5e1 !important;
+        padding-bottom: 16px !important;
+      }
+      .page-break-before {
+        break-before: page !important;
+        page-break-before: always !important;
+      }
+    }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-900 dark:bg-[#121212] dark:text-[#F3F4F6] min-h-full flex flex-col font-sans transition-colors duration-200 antialiased pb-20 select-none">
@@ -66,7 +137,7 @@
       </div>
 
       <!-- Quick Metrics & Actions -->
-      <div class="flex items-center space-x-2">
+      <div class="flex items-center space-x-1.5 sm:space-x-2">
         
         <!-- Practice Streak Counter -->
         <div class="flex items-center space-x-1 px-2.5 py-1 bg-orange-50 dark:bg-orange-950/50 border border-orange-200 dark:border-orange-900/60 rounded-lg text-orange-600 dark:text-orange-400 text-xs font-bold" title="Daily Practice Streak">
@@ -79,6 +150,16 @@
           <i data-lucide="hash" class="w-3.5 h-3.5 text-blue-500"></i>
           <span id="header-total-count">0</span>
         </div>
+
+        <!-- Rough Work Scratchpad Button -->
+        <button onclick="toggleScratchpad()" class="p-2 rounded-xl text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition" title="Rough Work Scratchpad / Whiteboard">
+          <i data-lucide="pen-tool" class="w-4 h-4"></i>
+        </button>
+
+        <!-- Printable Revision Sheet Modal Launcher -->
+        <button onclick="openPrintSheetModal()" class="p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#2E2E2E] transition" title="Generate Printable Revision Sheet">
+          <i data-lucide="printer" class="w-4 h-4"></i>
+        </button>
 
         <!-- Theme Toggle -->
         <button onclick="toggleTheme()" class="p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#2E2E2E] transition" aria-label="Toggle Theme">
@@ -104,6 +185,27 @@
     <!-- TAB 1: DOUBT VAULT (COMPACT CARDS, NO IMAGES IN LIST VIEW) -->
     <!-- --------------------------------------------------------------------- -->
     <section id="view-vault" class="tab-view space-y-3">
+
+      <!-- Spaced Repetition (SRS) Daily Due Doubts Banner -->
+      <div id="vault-srs-banner" class="hidden items-center justify-between p-3 sm:p-3.5 bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-pink-500/10 border border-indigo-200 dark:border-indigo-800/80 rounded-2xl">
+        <div class="flex items-center space-x-2.5">
+          <div class="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-xs flex-shrink-0">
+            <i data-lucide="sparkles" class="w-4 h-4"></i>
+          </div>
+          <div>
+            <h3 class="text-xs sm:text-sm font-black text-indigo-950 dark:text-indigo-200">
+              <span id="srs-due-count">0</span> Doubts Due for Spaced Revision Today
+            </h3>
+            <p class="text-[10px] text-slate-500 dark:text-slate-400">Review now to lock concepts in long-term memory.</p>
+          </div>
+        </div>
+        <div class="flex items-center space-x-2">
+          <button onclick="startSrsFlashcardsDeck()" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-xs transition flex items-center space-x-1">
+            <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+            <span>Revise Flashcards</span>
+          </button>
+        </div>
+      </div>
       
       <!-- Top Search & Multi-Filter Bar -->
       <div class="bg-white dark:bg-[#1E1E1E] p-3 sm:p-4 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] shadow-xs space-y-3">
@@ -115,7 +217,7 @@
             <input 
               type="text" 
               id="vault-search-input" 
-              placeholder="Search title, chapter, #tag, notebook..." 
+              placeholder="Search title, chapter, #tag, notebook, formula..." 
               oninput="debounceVaultRender()" 
               class="w-full pl-9 pr-8 py-2.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs sm:text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
             />
@@ -124,12 +226,19 @@
             </button>
           </div>
 
+          <!-- Multi-Select Batch Mode Toggle Button -->
+          <button type="button" id="vault-select-mode-btn" onclick="toggleBatchSelectMode()" class="px-3 py-2.5 bg-slate-100 dark:bg-[#2E2E2E] hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold transition flex items-center space-x-1.5" title="Select multiple doubts for batch actions">
+            <i data-lucide="check-square" class="w-3.5 h-3.5"></i>
+            <span id="vault-select-mode-label" class="hidden sm:inline">Select</span>
+          </button>
+
           <!-- Sort Select -->
           <select id="vault-sort-select" onchange="renderVault()" class="px-2.5 py-2.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500">
             <option value="newest">Newest First</option>
             <option value="oldest">Oldest First</option>
             <option value="difficulty_desc">Hardest First</option>
             <option value="title_asc">Title A-Z</option>
+            <option value="mastery_asc">Lowest Mastery (Needs Practice)</option>
           </select>
         </div>
 
@@ -151,6 +260,21 @@
             <i data-lucide="star" class="w-3 h-3 fill-amber-400"></i>
             <span>Starred</span>
           </button>
+          <button onclick="setSubjectFilter('unresolved')" data-subfilter="unresolved" class="quick-pill px-3 py-1.5 rounded-lg font-bold bg-slate-100 dark:bg-[#2E2E2E] text-rose-600 dark:text-rose-400 hover:bg-rose-50 transition whitespace-nowrap flex items-center space-x-1">
+            <i data-lucide="alert-circle" class="w-3 h-3"></i>
+            <span>Unresolved (<span id="pill-count-unresolved">0</span>)</span>
+          </button>
+        </div>
+
+        <!-- Dynamic Tag Cloud Pills Bar (if tags exist) -->
+        <div id="vault-tag-cloud-container" class="hidden items-center space-x-1.5 overflow-x-auto no-scrollbar pt-1 border-t border-slate-100 dark:border-[#2A2A2A] text-[11px]">
+          <span class="text-slate-400 font-bold flex items-center space-x-1 flex-shrink-0">
+            <i data-lucide="tag" class="w-3 h-3"></i>
+            <span>Tags:</span>
+          </span>
+          <div id="vault-tag-cloud-list" class="flex items-center space-x-1">
+            <!-- Dynamically populated -->
+          </div>
         </div>
 
         <!-- Active Notebook Banner (if filtering by specific notebook) -->
@@ -169,6 +293,39 @@
           </div>
         </div>
 
+      </div>
+
+      <!-- Floating Batch Actions Bar (visible when 1+ doubts are selected in batch mode) -->
+      <div id="vault-batch-bar" class="hidden sticky top-16 z-30 p-2.5 sm:p-3 bg-slate-900 text-white rounded-2xl shadow-xl flex items-center justify-between gap-2 border border-slate-700 animate-in fade-in slide-in-from-top-2 duration-200">
+        <div class="flex items-center space-x-2">
+          <input type="checkbox" id="batch-select-all-checkbox" onchange="toggleSelectAllBatch(this.checked)" class="rounded text-blue-600 focus:ring-blue-500 w-4 h-4" />
+          <span class="text-xs font-bold"><span id="batch-selected-count">0</span> Selected</span>
+        </div>
+        
+        <div class="flex items-center space-x-1.5 flex-wrap gap-y-1">
+          <button onclick="openBatchMoveModal()" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition flex items-center space-x-1">
+            <i data-lucide="folder" class="w-3.5 h-3.5 text-blue-400"></i>
+            <span>Move to Notebook</span>
+          </button>
+          <button onclick="batchToggleMastered()" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition flex items-center space-x-1">
+            <i data-lucide="check-circle" class="w-3.5 h-3.5 text-emerald-400"></i>
+            <span>Toggle Mastered</span>
+          </button>
+          <button onclick="openBatchTagModal()" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition flex items-center space-x-1">
+            <i data-lucide="tag" class="w-3.5 h-3.5 text-amber-400"></i>
+            <span>Add Tag</span>
+          </button>
+          <button onclick="batchPrintRevisionSheet()" class="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition flex items-center space-x-1">
+            <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+            <span>Print Sheet</span>
+          </button>
+          <button onclick="confirmBatchDelete()" class="px-2 py-1.5 bg-red-600/80 hover:bg-red-600 text-white text-xs font-bold rounded-xl transition" title="Delete Selected">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+          </button>
+          <button onclick="toggleBatchSelectMode(false)" class="p-1.5 text-slate-400 hover:text-white rounded-lg">
+            <i data-lucide="x" class="w-4 h-4"></i>
+          </button>
+        </div>
       </div>
 
       <!-- Compact Doubt Cards Container (Strictly Title, Date, Chapter, Subject, Difficulty, Notebook Badge, Custom Tags) -->
@@ -194,13 +351,13 @@
     </section>
 
     <!-- --------------------------------------------------------------------- -->
-    <!-- TAB 2: QUIZ & TEST ENGINE (PRACTICE, TEST & TEST HISTORY) -->
+    <!-- TAB 2: QUIZ & TEST ENGINE (PRACTICE, TEST, SRS FLASHCARDS & TEST HISTORY) -->
     <!-- --------------------------------------------------------------------- -->
     <section id="view-quiz" class="tab-view hidden space-y-4">
       
-      <!-- Quiz Sub-Navigation: Test Mode / Practice Mode / Test History -->
-      <div class="flex items-center justify-between bg-white dark:bg-[#1E1E1E] p-1.5 sm:p-2 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] shadow-xs">
-        <div class="grid grid-cols-3 gap-1 w-full max-w-md mx-auto">
+      <!-- Quiz Sub-Navigation: Test Mode / Practice Mode / Flashcards / Test History -->
+      <div class="bg-white dark:bg-[#1E1E1E] p-1.5 sm:p-2 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] shadow-xs">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-1 w-full">
           <button type="button" id="quiz-subtab-btn-test" onclick="switchQuizSubTab('test')" class="quiz-subtab-btn py-2 px-2 text-center rounded-xl text-xs font-bold transition bg-purple-600 text-white shadow-xs flex items-center justify-center space-x-1.5">
             <i data-lucide="clipboard-check" class="w-3.5 h-3.5"></i>
             <span>Test Mode</span>
@@ -209,6 +366,11 @@
           <button type="button" id="quiz-subtab-btn-practice" onclick="switchQuizSubTab('practice')" class="quiz-subtab-btn py-2 px-2 text-center rounded-xl text-xs font-bold transition text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-[#2E2E2E] flex items-center justify-center space-x-1.5">
             <i data-lucide="zap" class="w-3.5 h-3.5"></i>
             <span>Practice Mode</span>
+          </button>
+
+          <button type="button" id="quiz-subtab-btn-flashcards" onclick="switchQuizSubTab('flashcards')" class="quiz-subtab-btn py-2 px-2 text-center rounded-xl text-xs font-bold transition text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-[#2E2E2E] flex items-center justify-center space-x-1.5">
+            <i data-lucide="layers" class="w-3.5 h-3.5 text-indigo-500"></i>
+            <span>Flashcards (SRS)</span>
           </button>
 
           <button type="button" id="quiz-subtab-btn-history" onclick="switchQuizSubTab('history')" class="quiz-subtab-btn py-2 px-2 text-center rounded-xl text-xs font-bold transition text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-[#2E2E2E] flex items-center justify-center space-x-1.5">
@@ -235,6 +397,25 @@
                 <h2 class="text-base font-bold text-slate-900 dark:text-white">Custom Test Generator</h2>
                 <p class="text-xs text-slate-400">JEE format: +4 for correct, -1 negative marking. Solutions revealed post-submission.</p>
               </div>
+            </div>
+          </div>
+
+          <!-- Quick Exam Preset Buttons -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">Quick Exam Presets</label>
+            <div class="grid grid-cols-3 gap-1.5">
+              <button type="button" onclick="applyExamPreset('jee_speed')" class="p-2 text-left rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50/60 dark:bg-purple-950/40 hover:bg-purple-100 transition">
+                <p class="text-[11px] font-black text-purple-900 dark:text-purple-200">JEE Main Speed</p>
+                <p class="text-[9px] text-purple-700 dark:text-purple-400">15 Qs • 30 Mins</p>
+              </button>
+              <button type="button" onclick="applyExamPreset('jee_adv')" class="p-2 text-left rounded-xl border border-red-200 dark:border-red-800 bg-red-50/60 dark:bg-red-950/40 hover:bg-red-100 transition">
+                <p class="text-[11px] font-black text-red-900 dark:text-red-200">JEE Advanced</p>
+                <p class="text-[9px] text-red-700 dark:text-red-400">10 Qs • 40 Mins</p>
+              </button>
+              <button type="button" onclick="applyExamPreset('rapid_drill')" class="p-2 text-left rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-950/40 hover:bg-blue-100 transition">
+                <p class="text-[11px] font-black text-blue-900 dark:text-blue-200">Rapid Drill</p>
+                <p class="text-[9px] text-blue-700 dark:text-blue-400">5 Qs • 10 Mins</p>
+              </button>
             </div>
           </div>
 
@@ -407,7 +588,13 @@
               <p id="test-q-chapter" class="text-[11px] font-bold text-slate-400 truncate max-w-xs">Chapter Name</p>
             </div>
 
-            <div class="flex items-center space-x-2">
+            <div class="flex items-center space-x-1.5 sm:space-x-2">
+              <!-- Scratchpad Whiteboard Quick Tool -->
+              <button type="button" onclick="openScratchpadModal()" class="px-2.5 py-1.5 bg-slate-100 dark:bg-[#2E2E2E] hover:bg-slate-200 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-bold transition flex items-center space-x-1" title="Open Rough Work Whiteboard">
+                <i data-lucide="pen-tool" class="w-3.5 h-3.5 text-purple-600 dark:text-purple-400"></i>
+                <span class="hidden sm:inline">Rough Work</span>
+              </button>
+
               <!-- Live Timer -->
               <div class="flex items-center space-x-1 px-3 py-1.5 bg-purple-50 dark:bg-purple-950/60 rounded-xl text-purple-700 dark:text-purple-300 text-xs font-mono font-bold border border-purple-200 dark:border-purple-800 shadow-xs">
                 <i data-lucide="clock" class="w-3.5 h-3.5"></i>
@@ -849,7 +1036,200 @@
       </div>
 
       <!-- =================================================================== -->
-      <!-- 2.3 TEST HISTORY (Saved Tests -> Click to View Solutions) -->
+      <!-- 2.3 FLASHCARDS / SRS REVISION DRILL -->
+      <!-- =================================================================== -->
+      <div id="quiz-panel-flashcards" class="hidden space-y-4">
+        
+        <!-- Flashcards Setup / Overview Card -->
+        <div id="flashcards-setup-card" class="bg-white dark:bg-[#1E1E1E] p-4 sm:p-6 rounded-3xl border border-slate-200 dark:border-[#2E2E2E] shadow-sm space-y-4 max-w-xl mx-auto">
+          <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-[#2E2E2E]">
+            <div class="flex items-center space-x-2.5">
+              <div class="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-400 flex items-center justify-center shadow-xs">
+                <i data-lucide="layers" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h2 class="text-base font-bold text-slate-900 dark:text-white">SRS Flashcards Drill</h2>
+                <p class="text-xs text-slate-400">Spaced repetition memory deck to cement formulas and key problem tricks.</p>
+              </div>
+            </div>
+            <span id="flashcards-due-badge" class="px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+              0 Due Today
+            </span>
+          </div>
+
+          <!-- Subject and Filter Controls -->
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">Subject Deck</label>
+              <div class="grid grid-cols-4 gap-1.5">
+                <button type="button" onclick="setFlashcardSubjectFilter('all')" id="fc-sub-all" class="fc-sub-btn py-2 text-center rounded-xl text-xs font-bold bg-indigo-600 text-white shadow-xs">All</button>
+                <button type="button" onclick="setFlashcardSubjectFilter('Physics')" id="fc-sub-Physics" class="fc-sub-btn py-2 text-center rounded-xl text-xs font-bold bg-slate-100 dark:bg-[#2E2E2E] text-slate-700 dark:text-slate-300">Physics</button>
+                <button type="button" onclick="setFlashcardSubjectFilter('Chemistry')" id="fc-sub-Chemistry" class="fc-sub-btn py-2 text-center rounded-xl text-xs font-bold bg-slate-100 dark:bg-[#2E2E2E] text-slate-700 dark:text-slate-300">Chemistry</button>
+                <button type="button" onclick="setFlashcardSubjectFilter('Mathematics')" id="fc-sub-Mathematics" class="fc-sub-btn py-2 text-center rounded-xl text-xs font-bold bg-slate-100 dark:bg-[#2E2E2E] text-slate-700 dark:text-slate-300">Maths</button>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">Deck Source</label>
+                <select id="fc-source-filter" onchange="updateFlashcardPoolCount()" class="w-full px-3 py-2 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs font-medium dark:text-white">
+                  <option value="due_all">Due for Review + Unmastered</option>
+                  <option value="due_only">Due for Review Today Only</option>
+                  <option value="starred">Starred Doubts Only ⭐</option>
+                  <option value="lowest_mastery">Lowest Mastery Doubts</option>
+                  <option value="all_vault">Entire Doubt Vault Deck</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">Session Limit</label>
+                <select id="fc-limit-filter" class="w-full px-3 py-2 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs font-medium dark:text-white">
+                  <option value="10">10 Cards</option>
+                  <option value="20" selected>20 Cards</option>
+                  <option value="30">30 Cards</option>
+                  <option value="all">All Available</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Pool Indicator -->
+            <div class="p-3 bg-indigo-50/70 dark:bg-indigo-950/40 rounded-2xl border border-indigo-200/70 dark:border-indigo-800/60 flex items-center justify-between">
+              <span class="text-xs font-bold text-indigo-900 dark:text-indigo-200">
+                Cards Ready for Drill: <strong id="fc-pool-count" class="text-indigo-600 dark:text-indigo-400 font-black text-sm">0</strong>
+              </span>
+              <span class="text-[10px] font-bold text-indigo-600 dark:text-indigo-400">SM-2 Spaced Repetition</span>
+            </div>
+
+            <button type="button" onclick="startFlashcardSession()" class="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 active:scale-98 text-white font-black text-sm rounded-2xl shadow-md transition flex items-center justify-center space-x-2">
+              <i data-lucide="play" class="w-4 h-4 fill-white"></i>
+              <span>Start Flashcard Revision</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Active Flashcard Interactive Player -->
+        <div id="flashcards-active-panel" class="hidden max-w-xl mx-auto space-y-4">
+          
+          <!-- Card Header & Navigation -->
+          <div class="flex items-center justify-between px-1">
+            <span id="fc-card-progress" class="text-xs font-black text-indigo-600 dark:text-indigo-400">Card 1 of 10</span>
+            <div class="flex items-center space-x-2">
+              <span id="fc-card-subject" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300">Physics</span>
+              <button onclick="exitFlashcardSession()" class="text-xs text-slate-500 hover:text-red-500 font-bold px-2 py-1 bg-white dark:bg-[#1E1E1E] border border-slate-200 dark:border-[#2E2E2E] rounded-lg">
+                Close Deck
+              </button>
+            </div>
+          </div>
+
+          <!-- Flip Card Container -->
+          <div class="cursor-pointer select-none" onclick="toggleFlashcardFlip()">
+            <div id="fc-card-body" class="bg-white dark:bg-[#1E1E1E] min-h-[320px] p-5 sm:p-6 rounded-3xl border-2 border-indigo-200 dark:border-indigo-900/60 shadow-lg flex flex-col justify-between transition-all duration-300 transform hover:scale-[1.01]">
+              
+              <!-- Front Side -->
+              <div id="fc-front-side" class="space-y-3">
+                <div class="flex items-center justify-between text-xs text-slate-400 font-bold">
+                  <span id="fc-chapter-name">Chapter Name</span>
+                  <span class="text-indigo-500 flex items-center space-x-1">
+                    <i data-lucide="rotate-cw" class="w-3.5 h-3.5"></i>
+                    <span>Tap anywhere to Flip</span>
+                  </span>
+                </div>
+
+                <h3 id="fc-front-title" class="text-base sm:text-lg font-black text-slate-900 dark:text-white leading-snug">
+                  Question prompt
+                </h3>
+
+                <!-- Front Image -->
+                <div id="fc-front-img-box" class="hidden relative bg-slate-50 dark:bg-[#121212] rounded-xl p-2 flex justify-center max-h-56 overflow-hidden">
+                  <img id="fc-front-img" src="" alt="Doubt question" class="max-h-52 object-contain rounded-lg" />
+                </div>
+
+                <!-- Hint if any -->
+                <div id="fc-front-hint-box" class="hidden p-2.5 bg-amber-50 dark:bg-amber-950/40 rounded-xl text-xs text-amber-800 dark:text-amber-300 font-medium">
+                  <strong>💡 Hint: </strong><span id="fc-front-hint-text"></span>
+                </div>
+              </div>
+
+              <!-- Back Side (Revealed on tap/flip) -->
+              <div id="fc-back-side" class="hidden space-y-3">
+                <div class="flex items-center justify-between text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                  <span class="flex items-center space-x-1">
+                    <i data-lucide="check-circle-2" class="w-4 h-4"></i>
+                    <span>Solution & Key Concept</span>
+                  </span>
+                  <span id="fc-back-answer-badge" class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200 text-[10px]"></span>
+                </div>
+
+                <div id="fc-back-notes-box" class="p-3 bg-emerald-50/70 dark:bg-emerald-950/40 rounded-2xl border border-emerald-200/60 dark:border-emerald-800/40">
+                  <p id="fc-back-notes" class="text-xs sm:text-sm text-emerald-950 dark:text-emerald-200 font-sans whitespace-pre-wrap leading-relaxed"></p>
+                </div>
+
+                <div id="fc-back-img-box" class="hidden relative bg-slate-50 dark:bg-[#121212] rounded-xl p-2 flex justify-center max-h-56 overflow-hidden">
+                  <img id="fc-back-img" src="" alt="Solution diagram" class="max-h-52 object-contain rounded-lg" />
+                </div>
+              </div>
+
+              <!-- Bottom Indicator -->
+              <div class="pt-3 border-t border-slate-100 dark:border-[#2E2E2E] flex items-center justify-between text-[11px] text-slate-400 font-medium">
+                <span id="fc-mastery-indicator">Mastery: 0 times</span>
+                <span id="fc-flip-prompt" class="text-indigo-600 dark:text-indigo-400 font-bold">Tap to see solution ➔</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Spaced Repetition Review Verdict Buttons (Shown on card flip) -->
+          <div id="fc-rating-controls" class="space-y-2">
+            <p class="text-[11px] font-bold text-center text-slate-500">How well did you recall this concept?</p>
+            <div class="grid grid-cols-4 gap-1.5">
+              <button type="button" onclick="rateFlashcard('again')" class="py-2.5 px-1 bg-red-100 dark:bg-red-950/60 hover:bg-red-200 text-red-800 dark:text-red-300 rounded-xl text-xs font-bold transition text-center shadow-xs">
+                <span class="block">Again</span>
+                <span class="text-[9px] opacity-75 font-semibold">1 day</span>
+              </button>
+              <button type="button" onclick="rateFlashcard('hard')" class="py-2.5 px-1 bg-amber-100 dark:bg-amber-950/60 hover:bg-amber-200 text-amber-800 dark:text-amber-300 rounded-xl text-xs font-bold transition text-center shadow-xs">
+                <span class="block">Hard</span>
+                <span class="text-[9px] opacity-75 font-semibold">3 days</span>
+              </button>
+              <button type="button" onclick="rateFlashcard('good')" class="py-2.5 px-1 bg-blue-100 dark:bg-blue-950/60 hover:bg-blue-200 text-blue-800 dark:text-blue-300 rounded-xl text-xs font-bold transition text-center shadow-xs">
+                <span class="block">Good</span>
+                <span class="text-[9px] opacity-75 font-semibold">7 days</span>
+              </button>
+              <button type="button" onclick="rateFlashcard('easy')" class="py-2.5 px-1 bg-emerald-100 dark:bg-emerald-950/60 hover:bg-emerald-200 text-emerald-800 dark:text-emerald-300 rounded-xl text-xs font-bold transition text-center shadow-xs">
+                <span class="block">Easy</span>
+                <span class="text-[9px] opacity-75 font-semibold">14 days</span>
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Flashcards Completed Summary -->
+        <div id="flashcards-summary-card" class="hidden bg-white dark:bg-[#1E1E1E] p-6 rounded-3xl border border-slate-200 dark:border-[#2E2E2E] shadow-sm space-y-4 max-w-md mx-auto text-center">
+          <div class="w-14 h-14 mx-auto rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+            <i data-lucide="sparkles" class="w-7 h-7"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-slate-900 dark:text-white">Flashcard Drill Complete!</h3>
+            <p class="text-xs text-slate-400 mt-1">All cards scheduled according to your recall intervals.</p>
+          </div>
+          <div class="grid grid-cols-2 gap-2 py-2">
+            <div class="p-3 bg-slate-50 dark:bg-[#121212] rounded-xl">
+              <p class="text-[10px] text-slate-400 font-bold">Reviewed</p>
+              <p id="fc-res-count" class="text-lg font-black text-slate-800 dark:text-slate-200">10</p>
+            </div>
+            <div class="p-3 bg-emerald-50 dark:bg-emerald-950/50 rounded-xl">
+              <p class="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold">Mastered</p>
+              <p id="fc-res-mastered" class="text-lg font-black text-emerald-600 dark:text-emerald-400">8</p>
+            </div>
+          </div>
+          <button onclick="exitFlashcardSession()" class="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow">
+            Done & Return to Vault
+          </button>
+        </div>
+
+      </div>
+
+      <!-- =================================================================== -->
+      <!-- 2.4 TEST HISTORY (Saved Tests -> Click to View Solutions) -->
       <!-- =================================================================== -->
       <div id="quiz-panel-history" class="hidden space-y-4">
         
@@ -1055,7 +1435,7 @@
         </div>
       </div>
 
-      <!-- Graphs: Subject Distribution & Daily Solved Volume -->
+      <!-- Graphs: Subject Distribution, Daily Volume, Mistake Analysis & Difficulty Mastery -->
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         
         <!-- Subject Balance Doughnut -->
@@ -1071,6 +1451,22 @@
           <h4 class="text-xs font-bold text-slate-700 dark:text-slate-300">Daily Solved Questions (Last 7 Days)</h4>
           <div class="h-48 relative flex items-center justify-center">
             <canvas id="chart-daily-volume"></canvas>
+          </div>
+        </div>
+
+        <!-- Mistake Type Distribution Bar -->
+        <div class="bg-white dark:bg-[#1E1E1E] p-4 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] shadow-xs space-y-2">
+          <h4 class="text-xs font-bold text-slate-700 dark:text-slate-300">Mistake Root Cause Analysis (Doubt Vault)</h4>
+          <div class="h-48 relative flex items-center justify-center">
+            <canvas id="chart-mistakes-dist"></canvas>
+          </div>
+        </div>
+
+        <!-- Difficulty vs Mastery Distribution -->
+        <div class="bg-white dark:bg-[#1E1E1E] p-4 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] shadow-xs space-y-2">
+          <h4 class="text-xs font-bold text-slate-700 dark:text-slate-300">Vault Difficulty Breakdown & Mastery Rate</h4>
+          <div class="h-48 relative flex items-center justify-center">
+            <canvas id="chart-diff-mastery"></canvas>
           </div>
         </div>
 
@@ -1348,13 +1744,31 @@
               </div>
 
               <div>
-                <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">Step-by-Step Solution Notes</label>
-                <textarea id="doubt-solution-text" rows="3" placeholder="Write detailed derivation, equations or reason why Option B is correct..." class="w-full px-3 py-2 bg-white dark:bg-[#1E1E1E] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                <div class="flex items-center justify-between mb-1">
+                  <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-400">Step-by-Step Solution Notes</label>
+                  <span class="text-[10px] text-blue-600 dark:text-blue-400 font-semibold">Supports $LaTeX$ Math</span>
+                </div>
+
+                <!-- LaTeX Symbol Quick Insert Bar -->
+                <div class="flex items-center gap-1 overflow-x-auto custom-scrollbar pb-1 mb-1.5 text-xs">
+                  <span class="text-[10px] font-bold text-slate-400 whitespace-nowrap mr-0.5">Quick Math:</span>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$\\frac{a}{b}$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$\frac{a}{b}$</button>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$\\sqrt{x}$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$\sqrt{x}$</button>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$\\theta$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$\theta$</button>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$\\Delta$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$\Delta$</button>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$\\int_{0}^{t}$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$\int$</button>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$\\vec{F}$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$\vec{F}$</button>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$\\omega$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$\omega$</button>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$\\pm$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$\pm$</button>
+                  <button type="button" onclick="insertLatexSnippet('doubt-solution-text', '$x^2$')" class="px-2 py-0.5 rounded bg-slate-200/80 dark:bg-[#2A2A2A] hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-mono text-[10px] transition whitespace-nowrap">$x^2$</button>
+                </div>
+
+                <textarea id="doubt-solution-text" rows="3" placeholder="Write detailed derivation, equations (e.g. $F = ma$) or reason why Option B is correct..." class="w-full px-3 py-2 bg-white dark:bg-[#1E1E1E] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
               </div>
 
               <div>
                 <label class="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">Key Concept / Formula Hint</label>
-                <textarea id="doubt-hint" rows="2" placeholder="e.g., Conservation of Angular Momentum about contact point." class="w-full px-3 py-2 bg-white dark:bg-[#1E1E1E] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                <textarea id="doubt-hint" rows="2" placeholder="e.g., Conservation of Angular Momentum about contact point: $L_i = L_f$" class="w-full px-3 py-2 bg-white dark:bg-[#1E1E1E] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
               </div>
 
               <div>
@@ -2106,6 +2520,273 @@
           </button>
         </div>
 
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.13 INTERACTIVE SCRATCHPAD / WHITEBOARD MODAL (ROUGH WORK) -->
+  <div id="modal-scratchpad" class="hidden fixed inset-0 z-50 overflow-hidden bg-black/80 backdrop-blur-xs flex flex-col justify-between p-2 sm:p-4">
+    <div class="bg-white dark:bg-[#1E1E1E] rounded-3xl border border-slate-200 dark:border-[#2E2E2E] shadow-2xl flex-1 flex flex-col max-w-4xl w-full mx-auto overflow-hidden">
+      
+      <!-- Scratchpad Top Toolbar -->
+      <div class="p-3.5 border-b border-slate-100 dark:border-[#2E2E2E] bg-slate-50 dark:bg-[#181818] flex items-center justify-between flex-wrap gap-2">
+        <div class="flex items-center space-x-2">
+          <div class="w-8 h-8 rounded-xl bg-purple-100 dark:bg-purple-950 text-purple-600 flex items-center justify-center">
+            <i data-lucide="pen-tool" class="w-4 h-4"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-white">Rough Work Scratchpad</h3>
+            <p class="text-[10px] text-slate-400">Quick calculations, vector diagrams & scratch formulas</p>
+          </div>
+        </div>
+
+        <!-- Drawing Controls -->
+        <div class="flex items-center space-x-2 flex-wrap">
+          <!-- Color Picker Buttons -->
+          <div class="flex items-center space-x-1 bg-white dark:bg-[#252525] p-1 rounded-xl border border-slate-200 dark:border-[#2E2E2E]">
+            <button type="button" onclick="setScratchpadColor('#2563eb')" class="w-5 h-5 rounded-full bg-blue-600 border border-white dark:border-black" title="Blue"></button>
+            <button type="button" onclick="setScratchpadColor('#16a34a')" class="w-5 h-5 rounded-full bg-emerald-600 border border-white dark:border-black" title="Green"></button>
+            <button type="button" onclick="setScratchpadColor('#dc2626')" class="w-5 h-5 rounded-full bg-red-600 border border-white dark:border-black" title="Red"></button>
+            <button type="button" onclick="setScratchpadColor('#9333ea')" class="w-5 h-5 rounded-full bg-purple-600 border border-white dark:border-black" title="Purple"></button>
+            <button type="button" onclick="setScratchpadColor('#1e293b')" class="w-5 h-5 rounded-full bg-slate-800 dark:bg-slate-200 border border-white dark:border-black" title="Dark"></button>
+          </div>
+
+          <!-- Stroke Size -->
+          <select id="scratchpad-size-select" onchange="setScratchpadSize(this.value)" class="px-2 py-1 bg-white dark:bg-[#252525] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs font-bold dark:text-white">
+            <option value="2">Thin (2px)</option>
+            <option value="4" selected>Medium (4px)</option>
+            <option value="8">Thick (8px)</option>
+          </select>
+
+          <!-- Clear -->
+          <button type="button" onclick="clearScratchpadCanvas()" class="px-2.5 py-1.5 bg-slate-200 dark:bg-[#2E2E2E] hover:bg-red-100 hover:text-red-600 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-xl transition flex items-center space-x-1">
+            <i data-lucide="trash" class="w-3.5 h-3.5"></i>
+            <span>Clear</span>
+          </button>
+
+          <!-- Close -->
+          <button type="button" onclick="closeScratchpadModal()" class="p-1.5 rounded-xl bg-slate-200 dark:bg-[#2E2E2E] text-slate-500 hover:text-slate-800 dark:hover:text-white transition">
+            <i data-lucide="x" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Scratchpad Drawing Canvas Area -->
+      <div id="scratchpad-canvas-container" class="flex-1 bg-slate-50/50 dark:bg-[#121212] relative overflow-hidden flex items-center justify-center p-2 cursor-crosshair">
+        <canvas id="scratchpad-canvas" class="bg-white dark:bg-[#181818] rounded-2xl shadow-inner border border-slate-200 dark:border-[#2A2A2A] w-full h-full"></canvas>
+      </div>
+
+      <div class="p-2.5 border-t border-slate-100 dark:border-[#2E2E2E] bg-slate-50 dark:bg-[#181818] flex items-center justify-between text-xs text-slate-400">
+        <span>Use touch or mouse pointer to solve equations</span>
+        <button type="button" onclick="closeScratchpadModal()" class="px-4 py-1.5 bg-purple-600 text-white rounded-xl font-bold shadow">
+          Done with Rough Work
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- 4.14 ADVANCED CUSTOM PRINTABLE & DUAL PDF EXPORT GENERATOR -->
+  <div id="modal-print-sheet" class="hidden fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-xs">
+    <div class="min-h-screen flex items-center justify-center p-2 sm:p-4">
+      <div class="bg-white dark:bg-[#1E1E1E] rounded-3xl border border-slate-200 dark:border-[#2E2E2E] shadow-2xl max-w-5xl w-full flex flex-col max-h-[95vh] overflow-hidden">
+        
+        <!-- Header Bar (Screen Only) -->
+        <div id="modal-print-sheet-header" class="p-3.5 sm:p-4 border-b border-slate-200 dark:border-[#2E2E2E] flex items-center justify-between flex-wrap gap-2.5 bg-slate-50 dark:bg-[#161616]">
+          <div class="flex items-center space-x-2.5">
+            <div class="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-xs">
+              <i data-lucide="file-text" class="w-4 h-4"></i>
+            </div>
+            <div>
+              <h3 class="text-sm sm:text-base font-bold text-slate-900 dark:text-white leading-tight">Custom PDF & Revision Sheet Generator</h3>
+              <p class="text-[11px] text-slate-500 dark:text-slate-400">Generate distinct Question Paper PDF and Answer Key / Solution PDF</p>
+            </div>
+          </div>
+
+          <div class="flex items-center space-x-2 flex-wrap">
+            <!-- 1-Click Dual PDF Button -->
+            <button type="button" onclick="exportDualPdfSequence()" class="px-3 py-1.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center space-x-1.5 transition" title="Generates Question Paper PDF first, then Solution PDF">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+              <span>Dual PDF (Both)</span>
+            </button>
+
+            <!-- Questions Only PDF Button -->
+            <button type="button" onclick="printQuestionPaper()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center space-x-1.5 transition">
+              <i data-lucide="help-circle" class="w-3.5 h-3.5"></i>
+              <span>Questions PDF</span>
+            </button>
+
+            <!-- Solutions Only PDF Button -->
+            <button type="button" onclick="printSolutionsPaper()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center space-x-1.5 transition">
+              <i data-lucide="check-circle" class="w-3.5 h-3.5"></i>
+              <span>Solutions & Key PDF</span>
+            </button>
+
+            <!-- Close Button -->
+            <button onclick="closePrintSheetModal()" class="p-1.5 rounded-xl text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800 transition">
+              <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Filter Controls Toolbar (Screen Only) -->
+        <div id="modal-print-controls-bar" class="p-3 bg-white dark:bg-[#1A1A1A] border-b border-slate-200 dark:border-[#2E2E2E] space-y-2.5 text-xs">
+          
+          <!-- Row 1: Primary Dropdown Filters -->
+          <div class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            <!-- Subject Filter -->
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 mb-0.5">Subject</label>
+              <select id="print-filter-subject" onchange="onPrintFilterChanged()" class="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-lg text-xs font-semibold dark:text-white">
+                <option value="all">All Subjects (Phy, Chem, Math)</option>
+                <option value="Physics">Physics Only</option>
+                <option value="Chemistry">Chemistry Only</option>
+                <option value="Mathematics">Mathematics Only</option>
+              </select>
+            </div>
+
+            <!-- Chapter Filter -->
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 mb-0.5">Chapter</label>
+              <select id="print-filter-chapter" onchange="onPrintFilterChanged()" class="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-lg text-xs font-semibold dark:text-white">
+                <option value="all">All Chapters</option>
+              </select>
+            </div>
+
+            <!-- Difficulty Filter -->
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 mb-0.5">Difficulty</label>
+              <select id="print-filter-difficulty" onchange="onPrintFilterChanged()" class="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-lg text-xs font-semibold dark:text-white">
+                <option value="all">All Difficulties</option>
+                <option value="Easy">Easy</option>
+                <option value="Medium">Medium</option>
+                <option value="Hard">Hard</option>
+                <option value="JEE Advanced">JEE Advanced</option>
+              </select>
+            </div>
+
+            <!-- Scope / Source Filter -->
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 mb-0.5">Scope / Source</label>
+              <select id="print-filter-scope" onchange="onPrintFilterChanged()" class="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-lg text-xs font-semibold dark:text-white">
+                <option value="all">All Doubts in Scope</option>
+                <option value="starred">Starred Doubts Only ⭐</option>
+                <option value="unmastered">Needs Mastery (&lt; 3 attempts)</option>
+                <option value="batch">Currently Batch Selected</option>
+              </select>
+            </div>
+
+            <!-- Rough Work Space Setting -->
+            <div>
+              <label class="block text-[10px] font-bold text-slate-400 mb-0.5">Rough Work Space</label>
+              <select id="print-filter-rough-space" onchange="renderPrintPreview()" class="w-full px-2.5 py-1.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-lg text-xs font-semibold dark:text-white">
+                <option value="medium">Medium Grid Box (Standard)</option>
+                <option value="large">Large Rough Work Space</option>
+                <option value="none">No Rough Space (Compact)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Row 2: Live Selection Summary & Granular Doubt Selector Toggle -->
+          <div class="flex items-center justify-between flex-wrap gap-2 pt-1 border-t border-slate-100 dark:border-[#252525]">
+            <div class="flex items-center space-x-2 text-xs">
+              <span class="font-bold text-slate-700 dark:text-slate-300">Selected Doubts:</span>
+              <span id="print-selected-count-badge" class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 font-extrabold text-[11px]">
+                0 Doubts
+              </span>
+              <button type="button" onclick="togglePrintSelectorDrawer()" class="text-blue-600 dark:text-blue-400 font-bold hover:underline flex items-center space-x-1">
+                <span id="print-toggle-drawer-text">Select Specific Doubts (Granular)</span>
+                <i id="print-drawer-icon" data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
+
+            <!-- Preview Mode Switcher Tabs -->
+            <div id="modal-print-mode-tabs" class="flex items-center space-x-1 bg-slate-100 dark:bg-[#252525] p-0.5 rounded-xl text-[11px] font-bold">
+              <button type="button" onclick="switchPrintPreviewMode('questions')" id="print-mode-btn-questions" class="px-2.5 py-1 rounded-lg bg-white dark:bg-[#1E1E1E] text-blue-600 dark:text-blue-400 shadow-2xs">
+                Question Paper
+              </button>
+              <button type="button" onclick="switchPrintPreviewMode('solutions')" id="print-mode-btn-solutions" class="px-2.5 py-1 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-900">
+                Answer Key & Solutions
+              </button>
+              <button type="button" onclick="switchPrintPreviewMode('combined')" id="print-mode-btn-combined" class="px-2.5 py-1 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-900">
+                Combined Sheet
+              </button>
+            </div>
+          </div>
+
+          <!-- Granular Doubt Selector Drawer (Collapsible) -->
+          <div id="modal-print-selector-pane" class="hidden bg-slate-50 dark:bg-[#121212] p-3 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] space-y-2">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <div class="relative flex-1 min-w-[200px]">
+                <i data-lucide="search" class="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400"></i>
+                <input 
+                  type="text" 
+                  id="print-doubt-search" 
+                  oninput="renderPrintDoubtSelectorList()" 
+                  placeholder="Search doubts by title, formula, tag, or chapter..." 
+                  class="w-full pl-8 pr-3 py-1.5 bg-white dark:bg-[#1E1E1E] border border-slate-200 dark:border-[#2E2E2E] rounded-lg text-xs dark:text-white"
+                />
+              </div>
+
+              <div class="flex items-center space-x-1.5">
+                <button type="button" onclick="selectFilteredPrintDoubts(true)" class="px-2 py-1 bg-white dark:bg-[#1E1E1E] hover:bg-slate-100 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-[#2E2E2E] font-bold rounded-lg text-[10px]">
+                  Select All
+                </button>
+                <button type="button" onclick="selectFilteredPrintDoubts(false)" class="px-2 py-1 bg-white dark:bg-[#1E1E1E] hover:bg-slate-100 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-[#2E2E2E] font-bold rounded-lg text-[10px]">
+                  Deselect All
+                </button>
+                <button type="button" onclick="selectStarredPrintDoubts()" class="px-2 py-1 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-900/60 font-bold rounded-lg text-[10px] flex items-center space-x-0.5">
+                  <i data-lucide="star" class="w-3 h-3 fill-amber-400"></i>
+                  <span>Only Starred</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Scrollable List of Checkboxes -->
+            <div id="print-doubts-checklist" class="max-h-48 overflow-y-auto custom-scrollbar divide-y divide-slate-200/60 dark:divide-[#252525] bg-white dark:bg-[#1E1E1E] rounded-xl border border-slate-200 dark:border-[#2E2E2E] p-1">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Worksheet Preview Paper (This exact area prints cleanly) -->
+        <div id="printable-worksheet-content" class="p-6 sm:p-8 overflow-y-auto custom-scrollbar flex-1 bg-slate-100 dark:bg-[#121212]">
+          <!-- Populated dynamically with printable Question Paper or Solutions Sheet -->
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.15 BATCH MOVE TO NOTEBOOK MODAL -->
+  <div id="modal-batch-move" class="hidden fixed inset-0 z-50 overflow-y-auto">
+    <div class="fixed inset-0 bg-black/70 backdrop-blur-xs" onclick="closeBatchMoveModal()"></div>
+    <div class="relative min-h-screen flex items-center justify-center p-3">
+      <div class="relative bg-white dark:bg-[#1E1E1E] rounded-3xl border border-slate-200 dark:border-[#2E2E2E] shadow-2xl max-w-sm w-full p-5 space-y-4">
+        <h3 class="text-sm font-bold text-slate-900 dark:text-white">Move Selected Doubts to Notebook</h3>
+        <select id="batch-move-notebook-select" class="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs font-bold dark:text-white">
+          <!-- Dynamically populated -->
+        </select>
+        <div class="flex items-center justify-end space-x-2 pt-2">
+          <button type="button" onclick="closeBatchMoveModal()" class="px-3.5 py-1.5 bg-slate-200 dark:bg-[#2E2E2E] text-slate-700 dark:text-slate-300 font-bold text-xs rounded-xl">Cancel</button>
+          <button type="button" onclick="applyBatchMoveToNotebook()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow">Move Doubts</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4.16 BATCH ADD TAG MODAL -->
+  <div id="modal-batch-tag" class="hidden fixed inset-0 z-50 overflow-y-auto">
+    <div class="fixed inset-0 bg-black/70 backdrop-blur-xs" onclick="closeBatchTagModal()"></div>
+    <div class="relative min-h-screen flex items-center justify-center p-3">
+      <div class="relative bg-white dark:bg-[#1E1E1E] rounded-3xl border border-slate-200 dark:border-[#2E2E2E] shadow-2xl max-w-sm w-full p-5 space-y-4">
+        <h3 class="text-sm font-bold text-slate-900 dark:text-white">Add Tag to Selected Doubts</h3>
+        <input type="text" id="batch-tag-input" placeholder="e.g. #PYQ2024 or #NeedRevision" class="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-[#121212] border border-slate-200 dark:border-[#2E2E2E] rounded-xl text-xs font-bold dark:text-white" />
+        <div class="flex items-center justify-end space-x-2 pt-2">
+          <button type="button" onclick="closeBatchTagModal()" class="px-3.5 py-1.5 bg-slate-200 dark:bg-[#2E2E2E] text-slate-700 dark:text-slate-300 font-bold text-xs rounded-xl">Cancel</button>
+          <button type="button" onclick="applyBatchAddTag()" class="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow">Apply Tag</button>
+        </div>
       </div>
     </div>
   </div>
