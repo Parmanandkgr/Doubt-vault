@@ -1,0 +1,6 @@
+{
+  "name": "Doubt Vault & Practice Engine",
+  "description": "High-performance offline-first Doubt Vault, Practice Tracker, and JEE Test Engine for JEE Main & Advanced aspirants.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
