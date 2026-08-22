@@ -91,6 +91,8 @@ const STORAGE_KEYS = {
   NOTEBOOKS: "jee_vault_notebooks_clean_v3",
   CUSTOM_CHAPTERS: "jee_vault_custom_chapters_clean_v3",
   PRACTICE_LOGS: "jee_vault_practice_logs_clean_v3",
+  TEST_HISTORY: "jee_vault_test_history_clean_v3",
+  CHAPTER_TARGETS: "jee_vault_chapter_targets_clean_v3",
   THEME: "jee_vault_theme_clean_v3"
 };
 
@@ -100,7 +102,14 @@ const AppState = {
   notebooks: [],
   customChapters: [],
   practiceLogs: [],
+  testHistory: [],
+  chapterTargets: {},
   
+  // Chapter Targets filter & selection
+  targetSubjectFilter: 'all',
+  activeTargetSubject: 'Physics',
+  activeTargetChapter: '',
+
   // Vault Filtering
   subjectFilter: 'all', // 'all', 'Physics', 'Chemistry', 'Mathematics', 'starred'
   activeNotebookFilterId: null,
@@ -110,8 +119,11 @@ const AppState = {
   // Active Detail Modal
   activeDoubtId: null,
 
-  // Active Quiz State
-  quiz: {
+  // Quiz Sub-Navigation State ('practice' | 'test' | 'history')
+  quizSubTab: 'practice',
+
+  // 1. Practice Mode State (Immediate Solution Checking)
+  practice: {
     inProgress: false,
     questions: [],
     currentIndex: 0,
@@ -119,11 +131,36 @@ const AppState = {
     secondsElapsed: 0,
     timerInterval: null,
     selectedLength: 5
-  }
+  },
+
+  // 2. Test Mode State (Strict Test-First, Hidden Solutions, Palette, Timed)
+  testSession: {
+    inProgress: false,
+    testId: null,
+    title: '',
+    scope: 'all',
+    notebookId: null,
+    timerType: '30',
+    durationSeconds: 1800,
+    secondsElapsed: 0,
+    timerInterval: null,
+    currentIndex: 0,
+    questions: []
+  },
+
+  // 3. Test Review State
+  activeTestReviewId: null,
+  lastSubmittedTestId: null
 };
 
 let chartSubjectDist = null;
 let chartDailyVolume = null;
+
+// Live Camera State
+let liveCameraStream = null;
+let liveCameraTargetType = 'question';
+let liveCameraFacingMode = 'environment';
+let liveCameraCapturedBase64 = null;
 
 // =============================================================================
 // 2. DATA PERSISTENCE & INITIAL LOAD
@@ -141,6 +178,12 @@ function loadAppData() {
 
     const savedLogs = localStorage.getItem(STORAGE_KEYS.PRACTICE_LOGS);
     AppState.practiceLogs = savedLogs ? JSON.parse(savedLogs) : [];
+
+    const savedHistory = localStorage.getItem(STORAGE_KEYS.TEST_HISTORY);
+    AppState.testHistory = savedHistory ? JSON.parse(savedHistory) : [];
+
+    const savedTargets = localStorage.getItem(STORAGE_KEYS.CHAPTER_TARGETS);
+    AppState.chapterTargets = savedTargets ? JSON.parse(savedTargets) : {};
   } catch (err) {
     console.error("Failed to load app data from localStorage", err);
   }
@@ -196,18 +239,34 @@ function populateNotebookDropdown(selectedValue = '') {
     });
   }
 
-  // Also update quiz notebook picker
-  const quizPicker = document.getElementById('quiz-notebook-picker');
-  if (quizPicker) {
-    quizPicker.innerHTML = '';
+  // Practice notebook picker
+  const practicePicker = document.getElementById('practice-notebook-picker');
+  if (practicePicker) {
+    practicePicker.innerHTML = '';
     if ((AppState.notebooks || []).length === 0) {
-      quizPicker.innerHTML = '<option value="">No notebooks created yet</option>';
+      practicePicker.innerHTML = '<option value="">No notebooks created yet</option>';
     } else {
       AppState.notebooks.forEach(nb => {
         const opt = document.createElement('option');
         opt.value = nb.id;
         opt.textContent = nb.name;
-        quizPicker.appendChild(opt);
+        practicePicker.appendChild(opt);
+      });
+    }
+  }
+
+  // Test notebook picker
+  const testPicker = document.getElementById('test-notebook-picker');
+  if (testPicker) {
+    testPicker.innerHTML = '';
+    if ((AppState.notebooks || []).length === 0) {
+      testPicker.innerHTML = '<option value="">No notebooks created yet</option>';
+    } else {
+      AppState.notebooks.forEach(nb => {
+        const opt = document.createElement('option');
+        opt.value = nb.id;
+        opt.textContent = nb.name;
+        testPicker.appendChild(opt);
       });
     }
   }
@@ -227,6 +286,7 @@ document.addEventListener('DOMContentLoaded', () => {
   renderVault();
   updateHeaderMetrics();
   renderNotebooksList();
+  renderChapterTargets();
 
   if (window.lucide) window.lucide.createIcons();
 });
@@ -379,11 +439,8 @@ function switchTab(tabName) {
     renderNotebooksList();
   } else if (tabName === 'quiz') {
     populateNotebookDropdown();
-    if (!AppState.quiz.inProgress) {
-      document.getElementById('quiz-setup-card')?.classList.remove('hidden');
-      document.getElementById('quiz-active-panel')?.classList.add('hidden');
-      document.getElementById('quiz-results-card')?.classList.add('hidden');
-    }
+    updateTestHistoryBadge();
+    switchQuizSubTab(AppState.quizSubTab || 'practice');
   } else if (tabName === 'practice') {
     renderAnalyticsAndCharts();
   }
@@ -618,11 +675,74 @@ function toggleStarDoubt(doubtId) {
 }
 
 // =============================================================================
-// 6. INTERACTIVE QUIZ & RE-ATTEMPT ENGINE
+// 6. QUIZ ENGINE: PRACTICE MODE, TEST MODE & TEST HISTORY WITH SOLUTIONS
 // =============================================================================
-function handleQuizScopeChange() {
-  const scope = document.getElementById('quiz-scope-select')?.value;
-  const pickerBox = document.getElementById('quiz-notebook-picker-box');
+
+// 6.0 QUIZ SUB-TAB SWITCHER ('practice' | 'test' | 'history')
+function switchQuizSubTab(subTab) {
+  AppState.quizSubTab = subTab;
+
+  const tabs = ['practice', 'test', 'history'];
+  tabs.forEach(t => {
+    const btn = document.getElementById(`quiz-subtab-btn-${t}`);
+    const panel = document.getElementById(`quiz-panel-${t}`);
+
+    if (t === subTab) {
+      if (btn) {
+        btn.className = 'flex-1 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 bg-white dark:bg-[#1E1E1E] text-slate-900 dark:text-white shadow-xs';
+      }
+      panel?.classList.remove('hidden');
+    } else {
+      if (btn) {
+        btn.className = 'flex-1 py-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200';
+      }
+      panel?.classList.add('hidden');
+    }
+  });
+
+  if (subTab === 'history') {
+    renderTestHistory();
+  } else if (subTab === 'practice') {
+    populateNotebookDropdown();
+    if (!AppState.practice.inProgress) {
+      document.getElementById('practice-setup-card')?.classList.remove('hidden');
+      document.getElementById('practice-active-panel')?.classList.add('hidden');
+      document.getElementById('practice-results-card')?.classList.add('hidden');
+    }
+  } else if (subTab === 'test') {
+    populateNotebookDropdown();
+    if (!AppState.testSession.inProgress) {
+      document.getElementById('test-setup-card')?.classList.remove('hidden');
+      document.getElementById('test-active-panel')?.classList.add('hidden');
+      document.getElementById('test-submitted-card')?.classList.add('hidden');
+    }
+  }
+
+  updateTestHistoryBadge();
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function updateTestHistoryBadge() {
+  const badge = document.getElementById('test-history-badge');
+  const count = (AppState.testHistory || []).length;
+  if (badge) {
+    badge.textContent = String(count);
+    if (count > 0) badge.classList.remove('hidden');
+    else badge.classList.add('hidden');
+  }
+
+  const totalCountEl = document.getElementById('test-history-total-count');
+  if (totalCountEl) {
+    totalCountEl.textContent = `${count} ${count === 1 ? 'Test' : 'Tests'}`;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 6.1 PRACTICE MODE (IMMEDIATE SOLUTION VIEWING CAPABILITY)
+// -----------------------------------------------------------------------------
+function handlePracticeScopeChange() {
+  const scope = document.getElementById('practice-scope-select')?.value;
+  const pickerBox = document.getElementById('practice-notebook-picker-box');
   if (scope === 'notebook') {
     pickerBox?.classList.remove('hidden');
   } else {
@@ -630,35 +750,45 @@ function handleQuizScopeChange() {
   }
 }
 
-function setQuizLength(len) {
-  AppState.quiz.selectedLength = len;
-  document.querySelectorAll('.quiz-len-btn').forEach(btn => {
+function setPracticeLength(len) {
+  AppState.practice.selectedLength = len;
+  document.querySelectorAll('.practice-len-btn').forEach(btn => {
     if (Number(btn.dataset.len) === len) {
-      btn.className = 'quiz-len-btn py-2 rounded-xl border border-slate-200 dark:border-[#2E2E2E] text-xs font-bold bg-purple-600 text-white';
+      btn.className = 'practice-len-btn py-2 rounded-xl border border-slate-200 dark:border-[#2E2E2E] text-xs font-bold bg-blue-600 text-white';
     } else {
-      btn.className = 'quiz-len-btn py-2 rounded-xl border border-slate-200 dark:border-[#2E2E2E] text-xs font-bold bg-slate-50 dark:bg-[#121212] text-slate-700 dark:text-slate-300';
+      btn.className = 'practice-len-btn py-2 rounded-xl border border-slate-200 dark:border-[#2E2E2E] text-xs font-bold bg-slate-50 dark:bg-[#121212] text-slate-700 dark:text-slate-300';
     }
   });
 }
 
-function startQuizForActiveNotebook() {
+function startPracticeForActiveNotebook() {
   if (!AppState.activeNotebookFilterId) return;
   switchTab('quiz');
-  const scopeSelect = document.getElementById('quiz-scope-select');
+  switchQuizSubTab('practice');
+  const scopeSelect = document.getElementById('practice-scope-select');
   if (scopeSelect) {
     scopeSelect.value = 'notebook';
-    handleQuizScopeChange();
+    handlePracticeScopeChange();
   }
-  const nbPicker = document.getElementById('quiz-notebook-picker');
+  const nbPicker = document.getElementById('practice-notebook-picker');
   if (nbPicker) {
     nbPicker.value = AppState.activeNotebookFilterId;
   }
-  startQuizSession();
+  startPracticeSession();
 }
 
-function startQuizSession() {
-  const scope = document.getElementById('quiz-scope-select')?.value || 'all';
-  const selectedNotebookId = document.getElementById('quiz-notebook-picker')?.value;
+function startPracticeForSpecificNotebook(notebookId) {
+  AppState.activeNotebookFilterId = notebookId;
+  startPracticeForActiveNotebook();
+}
+
+function startQuizForSpecificNotebook(notebookId) {
+  startPracticeForSpecificNotebook(notebookId);
+}
+
+function startPracticeSession() {
+  const scope = document.getElementById('practice-scope-select')?.value || 'all';
+  const selectedNotebookId = document.getElementById('practice-notebook-picker')?.value;
 
   let pool = [...(AppState.doubts || [])];
 
@@ -671,69 +801,68 @@ function startQuizSession() {
   }
 
   if (pool.length === 0) {
-    showToast('No doubts found in the selected scope to quiz!', 'error');
+    showToast('No doubts found in the selected scope to practice!', 'error');
     return;
   }
 
   // Shuffle pool
   pool.sort(() => Math.random() - 0.5);
 
-  const len = AppState.quiz.selectedLength || 5;
+  const len = AppState.practice.selectedLength || 5;
   const questions = pool.slice(0, len);
 
-  AppState.quiz.inProgress = true;
-  AppState.quiz.questions = questions;
-  AppState.quiz.currentIndex = 0;
-  AppState.quiz.correctCount = 0;
-  AppState.quiz.secondsElapsed = 0;
+  AppState.practice.inProgress = true;
+  AppState.practice.questions = questions;
+  AppState.practice.currentIndex = 0;
+  AppState.practice.correctCount = 0;
+  AppState.practice.secondsElapsed = 0;
 
-  // Clear previous timer
-  if (AppState.quiz.timerInterval) clearInterval(AppState.quiz.timerInterval);
-  AppState.quiz.timerInterval = setInterval(() => {
-    AppState.quiz.secondsElapsed++;
-    updateQuizTimerDisplay();
+  if (AppState.practice.timerInterval) clearInterval(AppState.practice.timerInterval);
+  AppState.practice.timerInterval = setInterval(() => {
+    AppState.practice.secondsElapsed++;
+    updatePracticeTimerDisplay();
   }, 1000);
 
-  document.getElementById('quiz-setup-card')?.classList.add('hidden');
-  document.getElementById('quiz-results-card')?.classList.add('hidden');
-  document.getElementById('quiz-active-panel')?.classList.remove('hidden');
+  document.getElementById('practice-setup-card')?.classList.add('hidden');
+  document.getElementById('practice-results-card')?.classList.add('hidden');
+  document.getElementById('practice-active-panel')?.classList.remove('hidden');
 
-  renderCurrentQuizQuestion();
+  renderCurrentPracticeQuestion();
 }
 
-function updateQuizTimerDisplay() {
-  const el = document.getElementById('quiz-timer-display');
+function updatePracticeTimerDisplay() {
+  const el = document.getElementById('practice-timer-display');
   if (!el) return;
-  const m = Math.floor(AppState.quiz.secondsElapsed / 60);
-  const s = AppState.quiz.secondsElapsed % 60;
+  const m = Math.floor(AppState.practice.secondsElapsed / 60);
+  const s = AppState.practice.secondsElapsed % 60;
   el.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-function renderCurrentQuizQuestion() {
-  const q = AppState.quiz.questions[AppState.quiz.currentIndex];
+function renderCurrentPracticeQuestion() {
+  const q = AppState.practice.questions[AppState.practice.currentIndex];
   if (!q) {
-    finishQuizSession();
+    finishPracticeSession();
     return;
   }
 
-  const progText = document.getElementById('quiz-progress-text');
-  if (progText) progText.textContent = `Q ${AppState.quiz.currentIndex + 1} of ${AppState.quiz.questions.length}`;
+  const progText = document.getElementById('practice-progress-text');
+  if (progText) progText.textContent = `Q ${AppState.practice.currentIndex + 1} of ${AppState.practice.questions.length}`;
 
-  const subjBadge = document.getElementById('quiz-badge-subject');
+  const subjBadge = document.getElementById('practice-badge-subject');
   if (subjBadge) subjBadge.textContent = q.subject || 'Physics';
 
-  const diffBadge = document.getElementById('quiz-badge-diff');
+  const diffBadge = document.getElementById('practice-badge-diff');
   if (diffBadge) diffBadge.textContent = q.difficulty || 'Medium';
 
-  const chEl = document.getElementById('quiz-q-chapter');
+  const chEl = document.getElementById('practice-q-chapter');
   if (chEl) chEl.textContent = q.chapter || 'Topic';
 
-  const titleEl = document.getElementById('quiz-q-title');
+  const titleEl = document.getElementById('practice-q-title');
   if (titleEl) titleEl.textContent = q.title || 'Untitled Doubt';
 
-  // Question Image
-  const imgBox = document.getElementById('quiz-q-img-box');
-  const imgEl = document.getElementById('quiz-q-img');
+  // Question Image Box
+  const imgBox = document.getElementById('practice-q-img-box');
+  const imgEl = document.getElementById('practice-q-img');
   if (q.question_image_url) {
     if (imgEl) imgEl.src = q.question_image_url;
     imgBox?.classList.remove('hidden');
@@ -742,9 +871,9 @@ function renderCurrentQuizQuestion() {
   }
 
   // Hint box
-  const hintBox = document.getElementById('quiz-hint-box');
-  const hintText = document.getElementById('quiz-hint-text');
-  const hintContent = document.getElementById('quiz-hint-content');
+  const hintBox = document.getElementById('practice-hint-box');
+  const hintText = document.getElementById('practice-hint-text');
+  const hintContent = document.getElementById('practice-hint-content');
   if (q.hint_text && q.hint_text.trim()) {
     if (hintText) hintText.textContent = q.hint_text;
     hintContent?.classList.add('hidden');
@@ -753,80 +882,712 @@ function renderCurrentQuizQuestion() {
     hintBox?.classList.add('hidden');
   }
 
-  // Solution Box reset
-  const solBox = document.getElementById('quiz-solution-box');
-  const solImg = document.getElementById('quiz-sol-img');
-  const solBtnText = document.getElementById('quiz-solution-btn-text');
+  // Solution Box: Hidden by default, toggled immediately on button tap
+  const solBox = document.getElementById('practice-solution-box');
+  const solImg = document.getElementById('practice-sol-img');
+  const solNotes = document.getElementById('practice-sol-notes');
+  const solBtnText = document.getElementById('practice-solution-btn-text');
+
   if (solBox) solBox.classList.add('hidden');
-  if (solBtnText) solBtnText.textContent = 'Check Solution';
-  if (q.solution_image_url && solImg) {
-    solImg.src = q.solution_image_url;
+  if (solBtnText) solBtnText.textContent = 'View Solution Immediately';
+
+  // Solution Image
+  if (solImg) {
+    if (q.solution_image_url) {
+      solImg.src = q.solution_image_url;
+      solImg.classList.remove('hidden');
+    } else {
+      solImg.classList.add('hidden');
+    }
+  }
+
+  // Solution Notes
+  if (solNotes) {
+    if (q.solution_text && q.solution_text.trim()) {
+      solNotes.textContent = q.solution_text;
+      solNotes.classList.remove('hidden');
+    } else if (!q.solution_image_url) {
+      solNotes.textContent = 'No written solution was recorded during doubt capture.';
+      solNotes.classList.remove('hidden');
+    } else {
+      solNotes.classList.add('hidden');
+    }
+  }
+
+  // Navigation Prev Button State
+  const prevBtn = document.getElementById('practice-prev-btn');
+  if (prevBtn) {
+    prevBtn.disabled = AppState.practice.currentIndex === 0;
+    if (AppState.practice.currentIndex === 0) {
+      prevBtn.classList.add('opacity-40', 'cursor-not-allowed');
+    } else {
+      prevBtn.classList.remove('opacity-40', 'cursor-not-allowed');
+    }
   }
 
   // Clear answer input
-  const userAns = document.getElementById('quiz-user-answer');
+  const userAns = document.getElementById('practice-user-answer');
   if (userAns) userAns.value = '';
 
   if (window.lucide) window.lucide.createIcons();
 }
 
-function toggleQuizHint() {
-  const content = document.getElementById('quiz-hint-content');
+function togglePracticeHint() {
+  const content = document.getElementById('practice-hint-content');
   content?.classList.toggle('hidden');
 }
 
-function toggleQuizSolution() {
-  const solBox = document.getElementById('quiz-solution-box');
-  const solBtnText = document.getElementById('quiz-solution-btn-text');
+function togglePracticeSolution() {
+  const solBox = document.getElementById('practice-solution-box');
+  const solBtnText = document.getElementById('practice-solution-btn-text');
   if (!solBox) return;
 
   const isHidden = solBox.classList.toggle('hidden');
-  if (solBtnText) solBtnText.textContent = isHidden ? 'Check Solution' : 'Hide Solution';
-}
-
-function submitQuizAnswer(isCorrect) {
-  if (isCorrect) AppState.quiz.correctCount++;
-  nextQuizQuestion();
-}
-
-function nextQuizQuestion() {
-  AppState.quiz.currentIndex++;
-  if (AppState.quiz.currentIndex >= AppState.quiz.questions.length) {
-    finishQuizSession();
-  } else {
-    renderCurrentQuizQuestion();
+  if (solBtnText) {
+    solBtnText.textContent = isHidden ? 'View Solution Immediately' : 'Hide Solution';
   }
 }
 
-function finishQuizSession() {
-  if (AppState.quiz.timerInterval) clearInterval(AppState.quiz.timerInterval);
+function submitPracticeAnswer(isCorrect) {
+  if (isCorrect) AppState.practice.correctCount++;
+  nextPracticeQuestion();
+}
 
-  document.getElementById('quiz-active-panel')?.classList.add('hidden');
-  const resCard = document.getElementById('quiz-results-card');
+function prevPracticeQuestion() {
+  if (AppState.practice.currentIndex > 0) {
+    AppState.practice.currentIndex--;
+    renderCurrentPracticeQuestion();
+  }
+}
+
+function nextPracticeQuestion() {
+  AppState.practice.currentIndex++;
+  if (AppState.practice.currentIndex >= AppState.practice.questions.length) {
+    finishPracticeSession();
+  } else {
+    renderCurrentPracticeQuestion();
+  }
+}
+
+function finishPracticeSession() {
+  if (AppState.practice.timerInterval) clearInterval(AppState.practice.timerInterval);
+
+  document.getElementById('practice-active-panel')?.classList.add('hidden');
+  const resCard = document.getElementById('practice-results-card');
   resCard?.classList.remove('hidden');
 
-  const totalEl = document.getElementById('quiz-res-total');
-  const corEl = document.getElementById('quiz-res-correct');
-  const timeEl = document.getElementById('quiz-res-time');
+  const totalEl = document.getElementById('practice-res-total');
+  const corEl = document.getElementById('practice-res-correct');
+  const timeEl = document.getElementById('practice-res-time');
+  const accEl = document.getElementById('practice-res-accuracy');
 
-  const m = Math.floor(AppState.quiz.secondsElapsed / 60);
-  const s = AppState.quiz.secondsElapsed % 60;
+  const total = AppState.practice.questions.length;
+  const correct = AppState.practice.correctCount;
+  const acc = total > 0 ? Math.round((correct / total) * 100) : 0;
+
+  const m = Math.floor(AppState.practice.secondsElapsed / 60);
+  const s = AppState.practice.secondsElapsed % 60;
   const timeFormatted = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 
-  if (totalEl) totalEl.textContent = String(AppState.quiz.questions.length);
-  if (corEl) corEl.textContent = String(AppState.quiz.correctCount);
+  if (totalEl) totalEl.textContent = String(total);
+  if (corEl) corEl.textContent = String(correct);
   if (timeEl) timeEl.textContent = timeFormatted;
+  if (accEl) accEl.textContent = `${acc}%`;
 
-  AppState.quiz.inProgress = false;
+  AppState.practice.inProgress = false;
   if (window.lucide) window.lucide.createIcons();
 }
 
-function exitQuizSession() {
-  if (AppState.quiz.timerInterval) clearInterval(AppState.quiz.timerInterval);
-  AppState.quiz.inProgress = false;
-  document.getElementById('quiz-active-panel')?.classList.add('hidden');
-  document.getElementById('quiz-results-card')?.classList.add('hidden');
-  document.getElementById('quiz-setup-card')?.classList.remove('hidden');
+function exitPracticeSession() {
+  if (AppState.practice.timerInterval) clearInterval(AppState.practice.timerInterval);
+  AppState.practice.inProgress = false;
+  document.getElementById('practice-active-panel')?.classList.add('hidden');
+  document.getElementById('practice-results-card')?.classList.add('hidden');
+  document.getElementById('practice-setup-card')?.classList.remove('hidden');
+}
+
+// -----------------------------------------------------------------------------
+// 6.2 TEST MODE (STRICT TEST-FIRST ENGINE: SOLUTIONS HIDDEN UNTIL SUBMISSION)
+// -----------------------------------------------------------------------------
+function handleTestScopeChange() {
+  const scope = document.getElementById('test-scope-select')?.value;
+  const pickerBox = document.getElementById('test-notebook-picker-box');
+  if (scope === 'notebook') {
+    pickerBox?.classList.remove('hidden');
+  } else {
+    pickerBox?.classList.add('hidden');
+  }
+}
+
+function startTestSession() {
+  const scope = document.getElementById('test-scope-select')?.value || 'all';
+  const selectedNotebookId = document.getElementById('test-notebook-picker')?.value;
+  const testNameInput = document.getElementById('test-name-input')?.value?.trim();
+  const countSelect = document.getElementById('test-count-select')?.value || '5';
+  const timerSelect = document.getElementById('test-timer-select')?.value || '30';
+
+  let pool = [...(AppState.doubts || [])];
+
+  if (scope === 'Physics' || scope === 'Chemistry' || scope === 'Mathematics') {
+    pool = pool.filter(d => d.subject === scope);
+  } else if (scope === 'starred') {
+    pool = pool.filter(d => d.is_starred);
+  } else if (scope === 'notebook' && selectedNotebookId) {
+    pool = pool.filter(d => d.notebook_id === selectedNotebookId);
+  }
+
+  if (pool.length === 0) {
+    showToast('No doubts found in the selected scope to generate a test!', 'error');
+    return;
+  }
+
+  // Shuffle pool
+  pool.sort(() => Math.random() - 0.5);
+
+  const testCount = countSelect === 'all' ? pool.length : Math.min(parseInt(countSelect, 10), pool.length);
+  const selectedQuestions = pool.slice(0, testCount).map((q, idx) => ({
+    id: q.id,
+    doubt_id: q.id,
+    title: q.title || `Question ${idx + 1}`,
+    chapter: q.chapter || 'Topic',
+    subject: q.subject || 'Physics',
+    difficulty: q.difficulty || 'Medium',
+    question_image_url: q.question_image_url || '',
+    solution_image_url: q.solution_image_url || '',
+    solution_text: q.solution_text || '',
+    hint_text: q.hint_text || '',
+    userAnswer: '',
+    isMarkedForReview: false,
+    status: 'unanswered' // 'unanswered' | 'answered'
+  }));
+
+  const generatedTitle = testNameInput || `${scope === 'all' ? 'Vault Comprehensive' : scope} Test Drill`;
+
+  AppState.testSession = {
+    inProgress: true,
+    testId: "test_" + Date.now(),
+    title: generatedTitle,
+    scope: scope,
+    notebookId: selectedNotebookId || null,
+    timerType: timerSelect,
+    durationSeconds: timerSelect === 'stopwatch' ? 0 : parseInt(timerSelect, 10) * 60,
+    secondsElapsed: 0,
+    timerInterval: null,
+    currentIndex: 0,
+    questions: selectedQuestions
+  };
+
+  // Start Test Timer
+  if (AppState.testSession.timerInterval) clearInterval(AppState.testSession.timerInterval);
+  AppState.testSession.timerInterval = setInterval(() => {
+    AppState.testSession.secondsElapsed++;
+    updateTestTimerDisplay();
+
+    // Check countdown expiration if not stopwatch
+    if (AppState.testSession.timerType !== 'stopwatch') {
+      const remaining = AppState.testSession.durationSeconds - AppState.testSession.secondsElapsed;
+      if (remaining <= 0) {
+        clearInterval(AppState.testSession.timerInterval);
+        showToast('Time is up! Auto-submitting test...', 'info');
+        finalizeAndSaveTest();
+      }
+    }
+  }, 1000);
+
+  // Update UI Panels
+  const activeTitle = document.getElementById('test-active-title');
+  if (activeTitle) activeTitle.textContent = generatedTitle;
+
+  document.getElementById('test-setup-card')?.classList.add('hidden');
+  document.getElementById('test-submitted-card')?.classList.add('hidden');
+  document.getElementById('test-active-panel')?.classList.remove('hidden');
+
+  updateTestTimerDisplay();
+  renderCurrentTestQuestion();
+  renderTestPalette();
+}
+
+function updateTestTimerDisplay() {
+  const el = document.getElementById('test-timer-display');
+  const icon = document.getElementById('test-timer-icon');
+  if (!el) return;
+
+  if (AppState.testSession.timerType === 'stopwatch') {
+    const m = Math.floor(AppState.testSession.secondsElapsed / 60);
+    const s = AppState.testSession.secondsElapsed % 60;
+    el.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  } else {
+    const total = AppState.testSession.durationSeconds;
+    const remaining = Math.max(0, total - AppState.testSession.secondsElapsed);
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    el.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+
+    if (remaining <= 120) {
+      el.classList.add('text-red-500');
+      icon?.classList.add('text-red-500', 'animate-pulse');
+    } else {
+      el.classList.remove('text-red-500');
+      icon?.classList.remove('text-red-500', 'animate-pulse');
+    }
+  }
+}
+
+function renderCurrentTestQuestion() {
+  const q = AppState.testSession.questions[AppState.testSession.currentIndex];
+  if (!q) return;
+
+  const progText = document.getElementById('test-progress-text');
+  if (progText) progText.textContent = `Q ${AppState.testSession.currentIndex + 1} of ${AppState.testSession.questions.length}`;
+
+  const subjBadge = document.getElementById('test-badge-subject');
+  if (subjBadge) subjBadge.textContent = q.subject || 'Physics';
+
+  const diffBadge = document.getElementById('test-badge-diff');
+  if (diffBadge) diffBadge.textContent = q.difficulty || 'Medium';
+
+  const chEl = document.getElementById('test-q-chapter');
+  if (chEl) chEl.textContent = q.chapter || 'Topic';
+
+  const titleEl = document.getElementById('test-q-title');
+  if (titleEl) titleEl.textContent = q.title || 'Untitled Doubt';
+
+  // Question Image Box
+  const imgBox = document.getElementById('test-q-img-box');
+  const imgEl = document.getElementById('test-q-img');
+  if (q.question_image_url) {
+    if (imgEl) imgEl.src = q.question_image_url;
+    imgBox?.classList.remove('hidden');
+  } else {
+    imgBox?.classList.add('hidden');
+  }
+
+  // Hint box
+  const hintBox = document.getElementById('test-hint-box');
+  const hintText = document.getElementById('test-hint-text');
+  const hintContent = document.getElementById('test-hint-content');
+  if (q.hint_text && q.hint_text.trim()) {
+    if (hintText) hintText.textContent = q.hint_text;
+    hintContent?.classList.add('hidden');
+    hintBox?.classList.remove('hidden');
+  } else {
+    hintBox?.classList.add('hidden');
+  }
+
+  // Answer Input value
+  const userAns = document.getElementById('test-user-answer');
+  if (userAns) userAns.value = q.userAnswer || '';
+
+  // Mark for Review Status
+  const reviewBtn = document.getElementById('test-mark-review-btn');
+  const reviewCheckbox = document.getElementById('test-mark-review-checkbox');
+  if (reviewCheckbox) reviewCheckbox.checked = !!q.isMarkedForReview;
+  if (reviewBtn) {
+    if (q.isMarkedForReview) {
+      reviewBtn.classList.add('border-amber-400', 'bg-amber-50', 'dark:bg-amber-950/40', 'text-amber-700', 'dark:text-amber-300');
+    } else {
+      reviewBtn.classList.remove('border-amber-400', 'bg-amber-50', 'dark:bg-amber-950/40', 'text-amber-700', 'dark:text-amber-300');
+    }
+  }
+
+  // Prev / Next button states
+  const prevBtn = document.getElementById('test-prev-btn');
+  if (prevBtn) {
+    prevBtn.disabled = AppState.testSession.currentIndex === 0;
+    if (AppState.testSession.currentIndex === 0) {
+      prevBtn.classList.add('opacity-40', 'cursor-not-allowed');
+    } else {
+      prevBtn.classList.remove('opacity-40', 'cursor-not-allowed');
+    }
+  }
+
+  const nextBtn = document.getElementById('test-next-btn');
+  const isLast = AppState.testSession.currentIndex === AppState.testSession.questions.length - 1;
+  if (nextBtn) {
+    nextBtn.innerHTML = isLast ? `<span>Finish & Submit</span><i data-lucide="check-circle" class="w-4 h-4"></i>` : `<span>Save & Next</span><i data-lucide="chevron-right" class="w-4 h-4"></i>`;
+  }
+
+  renderTestPalette();
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function saveCurrentTestAnswer() {
+  const q = AppState.testSession.questions[AppState.testSession.currentIndex];
+  if (!q) return;
+
+  const userAns = document.getElementById('test-user-answer')?.value || '';
+  q.userAnswer = userAns;
+  q.status = userAns.trim() ? 'answered' : 'unanswered';
+
+  renderTestPalette();
+}
+
+function toggleTestMarkReview() {
+  const q = AppState.testSession.questions[AppState.testSession.currentIndex];
+  if (!q) return;
+
+  q.isMarkedForReview = !q.isMarkedForReview;
+  renderCurrentTestQuestion();
+}
+
+function renderTestPalette() {
+  const grid = document.getElementById('test-palette-grid');
+  if (!grid || !AppState.testSession.questions) return;
+
+  const currentIdx = AppState.testSession.currentIndex;
+  let answeredCount = 0;
+  let unansweredCount = 0;
+
+  grid.innerHTML = AppState.testSession.questions.map((q, idx) => {
+    const isCurrent = idx === currentIdx;
+    const isAnswered = q.userAnswer && q.userAnswer.trim().length > 0;
+    const isReview = !!q.isMarkedForReview;
+
+    if (isAnswered) answeredCount++;
+    else unansweredCount++;
+
+    let styleClasses = 'bg-slate-100 dark:bg-[#252525] text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-[#333]';
+
+    if (isCurrent) {
+      styleClasses = 'ring-2 ring-purple-600 font-black scale-105 ' + (isAnswered ? 'bg-purple-600 text-white' : 'bg-slate-200 dark:bg-[#333] text-purple-600 dark:text-purple-400');
+    } else if (isReview && isAnswered) {
+      styleClasses = 'bg-amber-500 text-white font-bold border border-amber-600';
+    } else if (isReview) {
+      styleClasses = 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border border-amber-400 font-bold';
+    } else if (isAnswered) {
+      styleClasses = 'bg-purple-600 text-white font-bold';
+    }
+
+    return `
+      <button onclick="jumpToTestQuestion(${idx})" class="w-8 h-8 rounded-xl flex items-center justify-center text-xs transition ${styleClasses}" title="Q${idx + 1}: ${isAnswered ? 'Answered' : 'Not Answered'}${isReview ? ' (Marked for review)' : ''}">
+        ${idx + 1}
+      </button>
+    `;
+  }).join('');
+
+  const ansEl = document.getElementById('test-answered-count');
+  const unansEl = document.getElementById('test-unanswered-count');
+  if (ansEl) ansEl.textContent = String(answeredCount);
+  if (unansEl) unansEl.textContent = String(unansweredCount);
+}
+
+function jumpToTestQuestion(index) {
+  saveCurrentTestAnswer();
+  if (index >= 0 && index < AppState.testSession.questions.length) {
+    AppState.testSession.currentIndex = index;
+    renderCurrentTestQuestion();
+  }
+}
+
+function prevTestQuestion() {
+  saveCurrentTestAnswer();
+  if (AppState.testSession.currentIndex > 0) {
+    AppState.testSession.currentIndex--;
+    renderCurrentTestQuestion();
+  }
+}
+
+function nextTestQuestion() {
+  saveCurrentTestAnswer();
+  if (AppState.testSession.currentIndex >= AppState.testSession.questions.length - 1) {
+    promptSubmitTest();
+  } else {
+    AppState.testSession.currentIndex++;
+    renderCurrentTestQuestion();
+  }
+}
+
+function promptSubmitTest() {
+  saveCurrentTestAnswer();
+  const answered = AppState.testSession.questions.filter(q => q.userAnswer && q.userAnswer.trim().length > 0).length;
+  const unanswered = AppState.testSession.questions.length - answered;
+
+  const aCountEl = document.getElementById('confirm-answered-count');
+  const uCountEl = document.getElementById('confirm-unanswered-count');
+  if (aCountEl) aCountEl.textContent = String(answered);
+  if (uCountEl) uCountEl.textContent = String(unanswered);
+
+  document.getElementById('modal-test-submit-confirm')?.classList.remove('hidden');
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function closeSubmitConfirmModal() {
+  document.getElementById('modal-test-submit-confirm')?.classList.add('hidden');
+}
+
+function finalizeAndSaveTest() {
+  closeSubmitConfirmModal();
+  saveCurrentTestAnswer();
+
+  if (AppState.testSession.timerInterval) {
+    clearInterval(AppState.testSession.timerInterval);
+  }
+
+  const questions = AppState.testSession.questions;
+  const answeredCount = questions.filter(q => q.userAnswer && q.userAnswer.trim().length > 0).length;
+  const unansweredCount = questions.length - answeredCount;
+
+  const m = Math.floor(AppState.testSession.secondsElapsed / 60);
+  const s = AppState.testSession.secondsElapsed % 60;
+  const timeFormatted = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+
+  const savedTestRecord = {
+    id: AppState.testSession.testId || ("test_" + Date.now()),
+    title: AppState.testSession.title,
+    scope: AppState.testSession.scope,
+    notebookId: AppState.testSession.notebookId,
+    completedAt: new Date().toISOString(),
+    timeSpentSeconds: AppState.testSession.secondsElapsed,
+    timeSpentFormatted: timeFormatted,
+    totalQuestions: questions.length,
+    answeredCount: answeredCount,
+    unansweredCount: unansweredCount,
+    questions: questions
+  };
+
+  // Prepend to Test History and persist
+  AppState.testHistory.unshift(savedTestRecord);
+  saveToStorage(STORAGE_KEYS.TEST_HISTORY, AppState.testHistory);
+
+  AppState.lastSubmittedTestId = savedTestRecord.id;
+  AppState.testSession.inProgress = false;
+
+  // Show Submission Success Card
+  document.getElementById('test-active-panel')?.classList.add('hidden');
+  const subCard = document.getElementById('test-submitted-card');
+  subCard?.classList.remove('hidden');
+
+  const subScore = document.getElementById('test-sub-score');
+  const subAns = document.getElementById('test-sub-answered');
+  const subTotal = document.getElementById('test-sub-total');
+  const subTime = document.getElementById('test-sub-time');
+
+  if (subScore) subScore.textContent = `${answeredCount}/${questions.length}`;
+  if (subAns) subAns.textContent = String(answeredCount);
+  if (subTotal) subTotal.textContent = String(questions.length);
+  if (subTime) subTime.textContent = timeFormatted;
+
+  updateTestHistoryBadge();
+  showToast('Test completed and saved to Test History!', 'success');
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function exitTestSessionPrompt() {
+  if (!confirm('Leave this active test? Progress will not be saved.')) return;
+  if (AppState.testSession.timerInterval) clearInterval(AppState.testSession.timerInterval);
+  AppState.testSession.inProgress = false;
+  document.getElementById('test-active-panel')?.classList.add('hidden');
+  document.getElementById('test-submitted-card')?.classList.add('hidden');
+  document.getElementById('test-setup-card')?.classList.remove('hidden');
+}
+
+function reviewLastSubmittedTest() {
+  if (AppState.lastSubmittedTestId) {
+    openTestReviewModal(AppState.lastSubmittedTestId);
+  } else if (AppState.testHistory.length > 0) {
+    openTestReviewModal(AppState.testHistory[0].id);
+  } else {
+    showToast('No submitted test found to review.', 'error');
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 6.3 TEST HISTORY & COMPREHENSIVE SOLUTIONS VIEWER
+// -----------------------------------------------------------------------------
+function renderTestHistory() {
+  const container = document.getElementById('test-history-list');
+  const emptyState = document.getElementById('test-history-empty');
+  if (!container) return;
+
+  const history = AppState.testHistory || [];
+  updateTestHistoryBadge();
+
+  if (history.length === 0) {
+    if (emptyState) emptyState.classList.remove('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
+  if (emptyState) emptyState.classList.add('hidden');
+
+  container.innerHTML = history.map((test, idx) => {
+    const dateObj = new Date(test.completedAt || Date.now());
+    const dateStr = dateObj.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const timeStr = dateObj.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+    let scopeBadgeColor = 'bg-purple-100 text-purple-700 dark:bg-purple-950 dark:text-purple-300';
+    if (test.scope === 'Physics') scopeBadgeColor = 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300';
+    if (test.scope === 'Chemistry') scopeBadgeColor = 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300';
+    if (test.scope === 'Mathematics') scopeBadgeColor = 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300';
+
+    return `
+      <div class="bg-white dark:bg-[#1E1E1E] p-4 sm:p-5 rounded-2xl border border-slate-200 dark:border-[#2E2E2E] shadow-xs hover:shadow-md transition flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        
+        <div class="space-y-1.5 flex-1 min-w-0">
+          <div class="flex items-center space-x-2 flex-wrap gap-y-1">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${scopeBadgeColor}">${test.scope || 'Vault Test'}</span>
+            <span class="text-[11px] text-slate-400 font-medium">${dateStr} &bull; ${timeStr}</span>
+          </div>
+
+          <h4 class="text-sm sm:text-base font-bold text-slate-900 dark:text-white truncate">
+            ${test.title || 'JEE Practice Test'}
+          </h4>
+
+          <div class="flex items-center space-x-3 text-xs text-slate-500 dark:text-slate-400 pt-0.5">
+            <span class="flex items-center space-x-1">
+              <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-purple-600 dark:text-purple-400"></i>
+              <span>Answered: <strong>${test.answeredCount}/${test.totalQuestions}</strong></span>
+            </span>
+            <span>&bull;</span>
+            <span class="flex items-center space-x-1">
+              <i data-lucide="clock" class="w-3.5 h-3.5 text-slate-400"></i>
+              <span>Time: <strong>${test.timeSpentFormatted || '00:00'}</strong></span>
+            </span>
+          </div>
+        </div>
+
+        <div class="flex items-center space-x-2 flex-shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100 dark:border-[#2E2E2E]">
+          <button onclick="openTestReviewModal('${test.id}')" class="flex-1 sm:flex-none px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-xl shadow transition flex items-center justify-center space-x-1.5">
+            <i data-lucide="eye" class="w-4 h-4"></i>
+            <span>View Solutions</span>
+          </button>
+          
+          <button onclick="deleteTestHistoryItem('${test.id}')" class="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-xl transition" title="Delete Test Record">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        </div>
+
+      </div>
+    `;
+  }).join('');
+
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function openTestReviewModal(testId) {
+  const test = (AppState.testHistory || []).find(t => t.id === testId);
+  if (!test) {
+    showToast('Test record not found', 'error');
+    return;
+  }
+
+  AppState.activeTestReviewId = testId;
+
+  const dateObj = new Date(test.completedAt || Date.now());
+  const dateStr = dateObj.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const timeStr = dateObj.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  const titleEl = document.getElementById('review-modal-title');
+  const metaEl = document.getElementById('review-modal-meta');
+  const scoreEl = document.getElementById('review-modal-score');
+  const timeEl = document.getElementById('review-modal-time');
+
+  if (titleEl) titleEl.textContent = test.title || 'Test Solutions Review';
+  if (metaEl) metaEl.textContent = `Completed ${dateStr} at ${timeStr} • Scope: ${test.scope || 'Vault'}`;
+  if (scoreEl) scoreEl.textContent = `${test.answeredCount}/${test.totalQuestions}`;
+  if (timeEl) timeEl.textContent = test.timeSpentFormatted || '00:00';
+
+  const container = document.getElementById('review-questions-container');
+  if (!container) return;
+
+  container.innerHTML = (test.questions || []).map((q, idx) => {
+    const isAnswered = q.userAnswer && q.userAnswer.trim().length > 0;
+    
+    return `
+      <div class="bg-slate-50 dark:bg-[#121212] rounded-2xl border border-slate-200 dark:border-[#2E2E2E] p-4 sm:p-5 space-y-3.5">
+        
+        <!-- Question Header -->
+        <div class="flex items-start justify-between gap-2">
+          <div class="flex items-center space-x-2 flex-wrap gap-y-1">
+            <span class="w-6 h-6 rounded-lg bg-purple-600 text-white text-xs font-bold flex items-center justify-center">Q${idx + 1}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300">${q.subject || 'Physics'}</span>
+            <span class="text-xs font-bold text-slate-500 dark:text-slate-400">${q.chapter || 'Topic'}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300">${q.difficulty || 'Medium'}</span>
+          </div>
+
+          <span class="px-2.5 py-1 rounded-full text-[10px] font-bold ${isAnswered ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400'}">
+            ${isAnswered ? 'Answered' : 'Unanswered'}
+          </span>
+        </div>
+
+        <!-- Question Title -->
+        <h4 class="text-sm sm:text-base font-bold text-slate-900 dark:text-white leading-relaxed">
+          ${q.title || 'Untitled Doubt Question'}
+        </h4>
+
+        <!-- Attached Question Image (if present) -->
+        ${q.question_image_url ? `
+          <div class="bg-white dark:bg-[#1A1A1A] p-2 rounded-xl border border-slate-200 dark:border-[#2E2E2E] inline-block">
+            <span class="text-[10px] font-bold text-slate-400 block mb-1">Question Attachment:</span>
+            <img src="${q.question_image_url}" alt="Question Image" class="max-h-60 rounded-lg object-contain" />
+          </div>
+        ` : ''}
+
+        <!-- User's Recorded Test Answer -->
+        <div class="p-3 bg-white dark:bg-[#1E1E1E] rounded-xl border border-slate-200 dark:border-[#2E2E2E] text-xs">
+          <span class="text-slate-400 font-semibold block mb-0.5">Your Response:</span>
+          <p class="font-mono text-slate-900 dark:text-white">${isAnswered ? q.userAnswer : '<span class="text-slate-400 italic">No answer submitted</span>'}</p>
+        </div>
+
+        <!-- Step-by-Step Solution Reveal Box -->
+        <div class="p-4 bg-purple-50/80 dark:bg-purple-950/30 rounded-2xl border border-purple-200 dark:border-purple-900/60 space-y-3">
+          <div class="flex items-center space-x-2 text-purple-900 dark:text-purple-300 font-bold text-xs">
+            <i data-lucide="check-circle" class="w-4 h-4 text-purple-600 dark:text-purple-400"></i>
+            <span>Verified Solution & Step-by-Step Explanation</span>
+          </div>
+
+          ${q.solution_image_url ? `
+            <div class="bg-white dark:bg-[#1E1E1E] p-2 rounded-xl border border-purple-200 dark:border-purple-900 inline-block">
+              <span class="text-[10px] font-bold text-purple-600 dark:text-purple-400 block mb-1">Solution Diagram/Work:</span>
+              <img src="${q.solution_image_url}" alt="Solution Image" class="max-h-64 rounded-lg object-contain" />
+            </div>
+          ` : ''}
+
+          ${q.solution_text && q.solution_text.trim() ? `
+            <div class="text-xs text-slate-800 dark:text-slate-200 leading-relaxed font-sans whitespace-pre-wrap bg-white/70 dark:bg-[#181818] p-3 rounded-xl border border-purple-100 dark:border-purple-900/40">
+              ${q.solution_text}
+            </div>
+          ` : ''}
+
+          ${!q.solution_image_url && (!q.solution_text || !q.solution_text.trim()) ? `
+            <p class="text-xs text-slate-400 italic">No handwritten solution photo was uploaded for this doubt.</p>
+          ` : ''}
+
+          ${q.hint_text && q.hint_text.trim() ? `
+            <div class="pt-2 border-t border-purple-200 dark:border-purple-900/40 text-[11px] text-purple-700 dark:text-purple-300 flex items-center space-x-1.5">
+              <i data-lucide="lightbulb" class="w-3.5 h-3.5"></i>
+              <span><strong>Key Formula / Hint:</strong> ${q.hint_text}</span>
+            </div>
+          ` : ''}
+        </div>
+
+      </div>
+    `;
+  }).join('');
+
+  document.getElementById('modal-test-review')?.classList.remove('hidden');
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function closeTestReviewModal() {
+  document.getElementById('modal-test-review')?.classList.add('hidden');
+}
+
+function deleteTestHistoryItem(testId) {
+  if (!confirm('Delete this test record from history?')) return;
+  AppState.testHistory = (AppState.testHistory || []).filter(t => t.id !== testId);
+  saveToStorage(STORAGE_KEYS.TEST_HISTORY, AppState.testHistory);
+  renderTestHistory();
+  showToast('Test record deleted', 'info');
+}
+
+function confirmClearTestHistory() {
+  if ((AppState.testHistory || []).length === 0) return;
+  if (!confirm('Are you sure you want to clear all test history records?')) return;
+  AppState.testHistory = [];
+  saveToStorage(STORAGE_KEYS.TEST_HISTORY, AppState.testHistory);
+  renderTestHistory();
+  showToast('Test history cleared', 'info');
 }
 
 // =============================================================================
@@ -888,6 +1649,7 @@ function deletePracticeLog(logId) {
 }
 
 function renderAnalyticsAndCharts() {
+  renderChapterTargets();
   renderDiagnosticChapters();
   renderPracticeLogsHistory();
   renderSubjectDistributionChart();
@@ -1200,11 +1962,354 @@ function deleteNotebook(notebookId) {
 }
 
 // =============================================================================
-// 9. CAPTURE ENGINE (100% OPTIONAL FIELDS)
+// 8.5 CHAPTER TARGETS & SYLLABUS TRACKER ENGINE
+// =============================================================================
+const DEFAULT_CHAPTER_TARGET = 40;
+
+function getChapterTarget(chapterName) {
+  if (AppState.chapterTargets && typeof AppState.chapterTargets[chapterName] === 'number') {
+    return AppState.chapterTargets[chapterName];
+  }
+  return DEFAULT_CHAPTER_TARGET;
+}
+
+function setChapterTarget(chapterName, targetNumber) {
+  const target = Math.max(1, Math.min(1000, parseInt(targetNumber, 10) || DEFAULT_CHAPTER_TARGET));
+  if (!AppState.chapterTargets) AppState.chapterTargets = {};
+  AppState.chapterTargets[chapterName] = target;
+  saveToStorage(STORAGE_KEYS.CHAPTER_TARGETS, AppState.chapterTargets);
+  renderChapterTargets();
+}
+
+function setTargetSubjectFilter(subject) {
+  AppState.targetSubjectFilter = subject;
+  
+  document.querySelectorAll('.target-subject-tab').forEach(tab => {
+    tab.classList.remove('bg-blue-600', 'text-white');
+    tab.classList.add('bg-slate-100', 'dark:bg-[#2E2E2E]', 'text-slate-700', 'dark:text-slate-300');
+  });
+
+  const activeTab = document.getElementById(`target-tab-${subject}`);
+  if (activeTab) {
+    activeTab.classList.remove('bg-slate-100', 'dark:bg-[#2E2E2E]', 'text-slate-700', 'dark:text-slate-300');
+    activeTab.classList.add('bg-blue-600', 'text-white');
+  }
+
+  renderChapterTargets();
+}
+
+function renderChapterTargets() {
+  const container = document.getElementById('chapter-targets-container');
+  if (!container) return;
+
+  const filterSubj = AppState.targetSubjectFilter || 'all';
+  const searchEl = document.getElementById('target-chapter-search');
+  const searchQ = searchEl ? searchEl.value.trim().toLowerCase() : '';
+
+  // Gather all chapters
+  let allList = [];
+  const subjectsToScan = (filterSubj === 'all') ? ['Physics', 'Chemistry', 'Mathematics'] : [filterSubj];
+
+  subjectsToScan.forEach(subj => {
+    const chapters = getAllChaptersForSubject(subj);
+    chapters.forEach(ch => {
+      allList.push({
+        subject: subj,
+        chapter: ch,
+        isCustom: (AppState.customChapters || []).some(c => c.subject === subj && c.chapter_name === ch)
+      });
+    });
+  });
+
+  // Calculate stats across all subjects
+  let totalTargets = 0;
+  let totalSolved = 0;
+  let completedCount = 0;
+  let inProgressCount = 0;
+
+  // Global counts for all subjects (for the summary banner)
+  const fullList = [];
+  ['Physics', 'Chemistry', 'Mathematics'].forEach(subj => {
+    getAllChaptersForSubject(subj).forEach(ch => {
+      fullList.push({ subject: subj, chapter: ch });
+    });
+  });
+
+  fullList.forEach(item => {
+    const target = getChapterTarget(item.chapter);
+    totalTargets += target;
+    const solved = (AppState.practiceLogs || [])
+      .filter(l => l.chapter === item.chapter)
+      .reduce((acc, curr) => acc + (Number(curr.question_count) || 0), 0);
+    totalSolved += solved;
+
+    if (solved >= target) completedCount++;
+    else if (solved > 0) inProgressCount++;
+  });
+
+  // Update summary banner
+  const overallPercent = totalTargets > 0 ? Math.min(100, Math.round((totalSolved / totalTargets) * 100)) : 0;
+  const percentEl = document.getElementById('target-overall-percent');
+  const barEl = document.getElementById('target-overall-bar');
+  const numsEl = document.getElementById('target-overall-numbers');
+  const compEl = document.getElementById('target-chapters-completed-count');
+  const inProgEl = document.getElementById('target-chapters-in-progress-count');
+
+  if (percentEl) percentEl.textContent = `${overallPercent}%`;
+  if (barEl) barEl.style.width = `${overallPercent}%`;
+  if (numsEl) numsEl.textContent = `${totalSolved} / ${totalTargets} Questions Solved`;
+  if (compEl) compEl.textContent = `${completedCount} / ${fullList.length}`;
+  if (inProgEl) inProgEl.textContent = `${inProgressCount}`;
+
+  // Filter list by search
+  let displayedList = allList;
+  if (searchQ) {
+    displayedList = displayedList.filter(item => 
+      item.chapter.toLowerCase().includes(searchQ) || item.subject.toLowerCase().includes(searchQ)
+    );
+  }
+
+  if (displayedList.length === 0) {
+    container.innerHTML = `
+      <div class="text-center py-8 text-slate-400 text-xs">
+        No chapters matching "${searchQ || filterSubj}".
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = displayedList.map(item => {
+    const target = getChapterTarget(item.chapter);
+    const solved = (AppState.practiceLogs || [])
+      .filter(l => l.chapter === item.chapter)
+      .reduce((acc, curr) => acc + (Number(curr.question_count) || 0), 0);
+    const doubtsCount = (AppState.doubts || []).filter(d => d.chapter === item.chapter).length;
+    
+    const pct = target > 0 ? Math.min(100, Math.round((solved / target) * 100)) : 0;
+    
+    let subjectBadgeClass = "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300";
+    if (item.subject === 'Chemistry') subjectBadgeClass = "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300";
+    if (item.subject === 'Mathematics') subjectBadgeClass = "bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300";
+
+    let statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 dark:bg-[#2A2A2A] text-slate-500">0%</span>`;
+    let progressGradient = "bg-slate-300 dark:bg-slate-700";
+
+    if (solved >= target) {
+      statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-extrabold bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center space-x-0.5"><i data-lucide="check" class="w-3 h-3 inline"></i><span>Target Met</span></span>`;
+      progressGradient = "bg-gradient-to-r from-emerald-500 to-teal-500";
+    } else if (pct >= 50) {
+      statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300">${pct}% On Track</span>`;
+      progressGradient = "bg-gradient-to-r from-blue-500 to-indigo-500";
+    } else if (solved > 0) {
+      statusBadge = `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300">${pct}% In Progress</span>`;
+      progressGradient = "bg-gradient-to-r from-amber-500 to-orange-500";
+    }
+
+    const safeChapter = item.chapter.replace(/'/g, "\\'");
+
+    return `
+      <div class="bg-slate-50 dark:bg-[#141414] p-3 rounded-2xl border border-slate-200/80 dark:border-[#2A2A2A] space-y-2.5 transition hover:border-slate-300 dark:hover:border-[#383838]">
+        
+        <!-- Chapter Header & Status -->
+        <div class="flex items-start justify-between gap-2">
+          <div class="space-y-0.5 flex-1 truncate">
+            <div class="flex items-center space-x-1.5">
+              <span class="px-2 py-0.5 rounded text-[9px] font-bold ${subjectBadgeClass}">${item.subject}</span>
+              ${item.isCustom ? '<span class="px-1.5 py-0.2 rounded text-[9px] font-semibold bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-300">Custom</span>' : ''}
+              ${doubtsCount > 0 ? `<span class="px-1.5 py-0.2 rounded text-[9px] font-bold bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-300">${doubtsCount} ${doubtsCount === 1 ? 'Doubt' : 'Doubts'}</span>` : ''}
+            </div>
+            <h4 class="text-xs sm:text-sm font-bold text-slate-800 dark:text-slate-200 truncate" title="${item.chapter}">
+              ${item.chapter}
+            </h4>
+          </div>
+
+          <div class="flex items-center space-x-1.5 flex-shrink-0">
+            ${statusBadge}
+          </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="w-full bg-slate-200/80 dark:bg-[#252525] h-2 rounded-full overflow-hidden">
+          <div class="${progressGradient} h-full rounded-full transition-all duration-300" style="width: ${pct}%"></div>
+        </div>
+
+        <!-- Numbers & Editable Target Controls -->
+        <div class="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-xs">
+          
+          <!-- Solved vs Target -->
+          <div class="flex items-center space-x-1.5">
+            <span class="font-black text-slate-900 dark:text-white">${solved}</span>
+            <span class="text-slate-400">/</span>
+            
+            <!-- Inline Target Stepper -->
+            <div class="inline-flex items-center bg-white dark:bg-[#1E1E1E] border border-slate-200 dark:border-[#2E2E2E] rounded-lg p-0.5 shadow-2xs">
+              <button type="button" onclick="adjustChapterTarget('${safeChapter}', -5)" class="w-5 h-5 flex items-center justify-center text-slate-500 hover:text-blue-600 font-bold hover:bg-slate-100 dark:hover:bg-[#2E2E2E] rounded" title="Decrease target by 5">-</button>
+              <input 
+                type="number" 
+                min="1" 
+                max="1000" 
+                value="${target}" 
+                onchange="setChapterTarget('${safeChapter}', this.value)"
+                class="w-11 text-center font-bold text-[11px] bg-transparent text-slate-800 dark:text-slate-200 focus:outline-none" 
+                title="Click to edit target questions"
+              />
+              <span class="text-[10px] text-slate-400 pr-1 font-medium">Qs</span>
+              <button type="button" onclick="adjustChapterTarget('${safeChapter}', 5)" class="w-5 h-5 flex items-center justify-center text-slate-500 hover:text-blue-600 font-bold hover:bg-slate-100 dark:hover:bg-[#2E2E2E] rounded" title="Increase target by 5">+</button>
+            </div>
+
+            <button type="button" onclick="openSingleTargetModal('${item.subject}', '${safeChapter}')" class="p-1 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition" title="Edit target in modal">
+              <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+
+          <!-- Action Shortcuts -->
+          <div class="flex items-center space-x-1.5">
+            <button type="button" onclick="openLogPracticeModalForChapter('${item.subject}', '${safeChapter}')" class="px-2.5 py-1 bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 text-blue-600 dark:text-blue-300 font-bold text-[10px] rounded-lg transition flex items-center space-x-1">
+              <i data-lucide="plus" class="w-3 h-3"></i>
+              <span>Log Qs</span>
+            </button>
+
+            <button type="button" onclick="openAddDoubtForChapter('${item.subject}', '${safeChapter}')" class="px-2.5 py-1 bg-purple-50 dark:bg-purple-950/60 hover:bg-purple-100 text-purple-600 dark:text-purple-300 font-bold text-[10px] rounded-lg transition flex items-center space-x-1">
+              <i data-lucide="help-circle" class="w-3 h-3"></i>
+              <span>Add Doubt</span>
+            </button>
+          </div>
+
+        </div>
+
+      </div>
+    `;
+  }).join('');
+
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function adjustChapterTarget(chapterName, delta) {
+  const current = getChapterTarget(chapterName);
+  const next = Math.max(1, Math.min(1000, current + delta));
+  setChapterTarget(chapterName, next);
+}
+
+function openSingleTargetModal(subject, chapterName) {
+  AppState.activeTargetSubject = subject;
+  AppState.activeTargetChapter = chapterName;
+
+  const currentTarget = getChapterTarget(chapterName);
+  const solved = (AppState.practiceLogs || [])
+    .filter(l => l.chapter === chapterName)
+    .reduce((acc, curr) => acc + (Number(curr.question_count) || 0), 0);
+
+  const nameEl = document.getElementById('single-target-chapter-name');
+  const badgeEl = document.getElementById('single-target-subject-badge');
+  const progEl = document.getElementById('single-target-current-progress');
+  const inputEl = document.getElementById('single-target-input');
+
+  if (nameEl) nameEl.textContent = chapterName;
+  if (badgeEl) {
+    badgeEl.textContent = subject;
+    badgeEl.className = `px-2 py-0.5 rounded text-[10px] font-bold ${
+      subject === 'Chemistry' ? 'bg-emerald-100 text-emerald-800' :
+      subject === 'Mathematics' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
+    }`;
+  }
+  if (progEl) progEl.textContent = `Current Solved: ${solved} Qs`;
+  if (inputEl) inputEl.value = currentTarget;
+
+  document.getElementById('modal-edit-single-target')?.classList.remove('hidden');
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function closeSingleTargetModal() {
+  document.getElementById('modal-edit-single-target')?.classList.add('hidden');
+}
+
+function adjustSingleTargetInput(delta) {
+  const inputEl = document.getElementById('single-target-input');
+  if (!inputEl) return;
+  let val = (parseInt(inputEl.value, 10) || DEFAULT_CHAPTER_TARGET) + delta;
+  if (val < 1) val = 1;
+  if (val > 1000) val = 1000;
+  inputEl.value = val;
+}
+
+function saveSingleChapterTarget() {
+  if (!AppState.activeTargetChapter) return;
+  const inputEl = document.getElementById('single-target-input');
+  const val = parseInt(inputEl?.value, 10) || DEFAULT_CHAPTER_TARGET;
+  setChapterTarget(AppState.activeTargetChapter, val);
+  closeSingleTargetModal();
+  showToast(`Updated target for "${AppState.activeTargetChapter}" to ${val} Qs!`, 'success');
+}
+
+function openBulkTargetsModal() {
+  document.getElementById('modal-bulk-targets')?.classList.remove('hidden');
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function closeBulkTargetsModal() {
+  document.getElementById('modal-bulk-targets')?.classList.add('hidden');
+}
+
+function setBulkTargetValue(val) {
+  const numInput = document.getElementById('bulk-target-number');
+  if (numInput) numInput.value = val;
+}
+
+function applyBulkTargets() {
+  const scope = document.getElementById('bulk-target-scope')?.value || 'all';
+  const targetNum = parseInt(document.getElementById('bulk-target-number')?.value, 10) || DEFAULT_CHAPTER_TARGET;
+
+  if (targetNum < 1) return;
+
+  const subjectsToUpdate = (scope === 'all') ? ['Physics', 'Chemistry', 'Mathematics'] : [scope];
+
+  if (!AppState.chapterTargets) AppState.chapterTargets = {};
+
+  let count = 0;
+  subjectsToUpdate.forEach(subj => {
+    getAllChaptersForSubject(subj).forEach(ch => {
+      AppState.chapterTargets[ch] = targetNum;
+      count++;
+    });
+  });
+
+  saveToStorage(STORAGE_KEYS.CHAPTER_TARGETS, AppState.chapterTargets);
+  closeBulkTargetsModal();
+  renderChapterTargets();
+  showToast(`Updated targets to ${targetNum} Qs for ${count} chapters!`, 'success');
+}
+
+function resetDefaultChapterTargets() {
+  if (!confirm(`Reset all chapter targets to default (${DEFAULT_CHAPTER_TARGET} Qs)?`)) return;
+  AppState.chapterTargets = {};
+  saveToStorage(STORAGE_KEYS.CHAPTER_TARGETS, AppState.chapterTargets);
+  renderChapterTargets();
+  showToast('Reset all chapter targets to default (40 Qs)', 'info');
+}
+
+function openLogPracticeModalForChapter(subject, chapter) {
+  openLogPracticeModal();
+  const subjSelect = document.getElementById('log-subject');
+  if (subjSelect) subjSelect.value = subject;
+  populateChapterDropdown('log-chapter', subject, chapter);
+}
+
+function openAddDoubtForChapter(subject, chapter) {
+  switchTab('capture');
+  const radio = document.querySelector(`input[name="doubt-subject"][value="${subject}"]`);
+  if (radio) {
+    radio.checked = true;
+    onSubjectChange(subject);
+  }
+  populateChapterDropdown('doubt-chapter', subject, chapter);
+}
+
+// =============================================================================
+// 9. CAPTURE ENGINE (100% OPTIONAL FIELDS & DUAL CAMERA / GALLERY UPLOADS)
 // =============================================================================
 let uploadedImages = { question: null, solution: null };
 
-function compressImage(file, maxWidth = 1000, quality = 0.8) {
+function compressImage(file, maxWidth = 1200, quality = 0.82) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -1237,6 +2342,146 @@ function compressImage(file, maxWidth = 1000, quality = 0.8) {
   });
 }
 
+function triggerGalleryUpload(type) {
+  const input = document.getElementById(`${type === 'question' ? 'q' : 'sol'}-gallery-input`);
+  if (input) {
+    input.value = '';
+    input.click();
+  }
+}
+
+function triggerCameraUpload(type) {
+  liveCameraTargetType = type;
+  const modal = document.getElementById('modal-live-camera');
+  const title = document.getElementById('camera-modal-title');
+  if (title) {
+    title.textContent = `Capture ${type === 'question' ? 'Question' : 'Solution'} Photo`;
+  }
+  modal?.classList.remove('hidden');
+  if (window.lucide) window.lucide.createIcons();
+  startCameraStream();
+}
+
+function startCameraStream() {
+  document.getElementById('camera-video-wrapper')?.classList.remove('hidden');
+  document.getElementById('camera-snapshot-wrapper')?.classList.add('hidden');
+  document.getElementById('camera-live-controls')?.classList.remove('hidden');
+  document.getElementById('camera-review-controls')?.classList.add('hidden');
+  document.getElementById('camera-error-fallback')?.classList.add('hidden');
+
+  stopCameraStreamTracks();
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    document.getElementById('camera-error-fallback')?.classList.remove('hidden');
+    return;
+  }
+
+  const constraints = {
+    video: {
+      facingMode: liveCameraFacingMode ? { ideal: liveCameraFacingMode } : { ideal: 'environment' },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 }
+    },
+    audio: false
+  };
+
+  navigator.mediaDevices.getUserMedia(constraints)
+    .then(stream => {
+      liveCameraStream = stream;
+      const video = document.getElementById('camera-video');
+      if (video) {
+        video.srcObject = stream;
+        video.play().catch(e => console.warn('Video play error:', e));
+      }
+    })
+    .catch(err => {
+      console.warn('getUserMedia stream error:', err);
+      document.getElementById('camera-error-fallback')?.classList.remove('hidden');
+    });
+}
+
+function toggleCameraFacingMode() {
+  liveCameraFacingMode = (liveCameraFacingMode === 'environment') ? 'user' : 'environment';
+  startCameraStream();
+}
+
+function captureCameraSnapshot() {
+  const video = document.getElementById('camera-video');
+  const canvas = document.getElementById('camera-canvas');
+  if (!video || !canvas) return;
+
+  const w = video.videoWidth || 800;
+  const h = video.videoHeight || 600;
+  canvas.width = w;
+  canvas.height = h;
+
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+
+  liveCameraCapturedBase64 = canvas.toDataURL('image/jpeg', 0.85);
+
+  const snapImg = document.getElementById('camera-snapshot-img');
+  if (snapImg) snapImg.src = liveCameraCapturedBase64;
+
+  document.getElementById('camera-video-wrapper')?.classList.add('hidden');
+  document.getElementById('camera-snapshot-wrapper')?.classList.remove('hidden');
+  document.getElementById('camera-live-controls')?.classList.add('hidden');
+  document.getElementById('camera-review-controls')?.classList.remove('hidden');
+}
+
+function retakeCameraSnapshot() {
+  document.getElementById('camera-snapshot-wrapper')?.classList.add('hidden');
+  document.getElementById('camera-video-wrapper')?.classList.remove('hidden');
+  document.getElementById('camera-review-controls')?.classList.add('hidden');
+  document.getElementById('camera-live-controls')?.classList.remove('hidden');
+}
+
+function acceptCameraSnapshot() {
+  if (!liveCameraCapturedBase64) return;
+
+  uploadedImages[liveCameraTargetType] = liveCameraCapturedBase64;
+
+  const prefix = liveCameraTargetType === 'question' ? 'q' : 'sol';
+  const previewContainer = document.getElementById(`${prefix}-preview-container`);
+  const previewImg = document.getElementById(`${prefix}-preview-img`);
+  const placeholder = document.getElementById(`${prefix}-placeholder`);
+  const statusBadge = document.getElementById(`${prefix}-status-badge`);
+
+  if (previewImg) previewImg.src = liveCameraCapturedBase64;
+  previewContainer?.classList.remove('hidden');
+  placeholder?.classList.add('hidden');
+  if (statusBadge) {
+    statusBadge.textContent = 'Photo attached ✓';
+    statusBadge.className = 'text-[10px] font-bold text-emerald-600 dark:text-emerald-400';
+  }
+
+  closeLiveCameraModal();
+  showToast(`${liveCameraTargetType === 'question' ? 'Question' : 'Solution'} photo captured!`, 'success');
+}
+
+function closeLiveCameraModal() {
+  stopCameraStreamTracks();
+  document.getElementById('modal-live-camera')?.classList.add('hidden');
+}
+
+function stopCameraStreamTracks() {
+  if (liveCameraStream) {
+    liveCameraStream.getTracks().forEach(track => {
+      try { track.stop(); } catch(e) {}
+    });
+    liveCameraStream = null;
+  }
+}
+
+function triggerNativeCameraFallback() {
+  closeLiveCameraModal();
+  const input = document.getElementById(`${liveCameraTargetType === 'question' ? 'q' : 'sol'}-camera-input`);
+  if (input) {
+    input.value = '';
+    input.click();
+  }
+}
+
 async function handleImageSelected(event, type) {
   const file = event.target.files[0];
   if (!file) return;
@@ -1249,10 +2494,15 @@ async function handleImageSelected(event, type) {
     const previewContainer = document.getElementById(`${prefix}-preview-container`);
     const previewImg = document.getElementById(`${prefix}-preview-img`);
     const placeholder = document.getElementById(`${prefix}-placeholder`);
+    const statusBadge = document.getElementById(`${prefix}-status-badge`);
 
     if (previewImg) previewImg.src = compressedBase64;
     previewContainer?.classList.remove('hidden');
     placeholder?.classList.add('hidden');
+    if (statusBadge) {
+      statusBadge.textContent = 'Photo attached ✓';
+      statusBadge.className = 'text-[10px] font-bold text-emerald-600 dark:text-emerald-400';
+    }
   } catch (err) {
     console.error("Image processing error", err);
     showToast("Failed to process image", "error");
@@ -1262,10 +2512,17 @@ async function handleImageSelected(event, type) {
 function removeImage(type) {
   uploadedImages[type] = null;
   const prefix = type === 'question' ? 'q' : 'sol';
-  const input = document.getElementById(`${prefix}-image-input`);
-  if (input) input.value = '';
+  const galleryInput = document.getElementById(`${prefix}-gallery-input`);
+  const cameraInput = document.getElementById(`${prefix}-camera-input`);
+  if (galleryInput) galleryInput.value = '';
+  if (cameraInput) cameraInput.value = '';
   document.getElementById(`${prefix}-preview-container`)?.classList.add('hidden');
   document.getElementById(`${prefix}-placeholder`)?.classList.remove('hidden');
+  const statusBadge = document.getElementById(`${prefix}-status-badge`);
+  if (statusBadge) {
+    statusBadge.textContent = 'Optional';
+    statusBadge.className = 'text-[10px] font-semibold text-slate-400';
+  }
 }
 
 function onSubjectChange(subject) {
@@ -1517,7 +2774,9 @@ function exportBackup() {
     doubts: AppState.doubts,
     notebooks: AppState.notebooks,
     custom_chapters: AppState.customChapters,
-    practice_logs: AppState.practiceLogs
+    practice_logs: AppState.practiceLogs,
+    test_history: AppState.testHistory,
+    chapter_targets: AppState.chapterTargets
   };
 
   const jsonStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportData, null, 2));
@@ -1556,11 +2815,21 @@ function handleImportBackup(e) {
         AppState.practiceLogs = parsed.practice_logs;
         saveToStorage(STORAGE_KEYS.PRACTICE_LOGS, AppState.practiceLogs);
       }
+      if (parsed.test_history && Array.isArray(parsed.test_history)) {
+        AppState.testHistory = parsed.test_history;
+        saveToStorage(STORAGE_KEYS.TEST_HISTORY, AppState.testHistory);
+      }
+      if (parsed.chapter_targets && typeof parsed.chapter_targets === 'object') {
+        AppState.chapterTargets = parsed.chapter_targets;
+        saveToStorage(STORAGE_KEYS.CHAPTER_TARGETS, AppState.chapterTargets);
+      }
       showToast('Backup restored successfully!', 'success');
       closeBackupModal();
       renderVault();
       updateHeaderMetrics();
       renderNotebooksList();
+      renderChapterTargets();
+      updateTestHistoryBadge();
     } catch (err) {
       console.error(err);
       showToast('Invalid backup JSON file', 'error');
@@ -1570,16 +2839,18 @@ function handleImportBackup(e) {
 }
 
 function confirmClearAllData() {
-  if (!confirm('Are you sure you want to clear all doubts, practice logs, and custom notebooks? This cannot be undone.')) return;
+  if (!confirm('Are you sure you want to clear all doubts, practice logs, custom notebooks, and test history? This cannot be undone.')) return;
   AppState.doubts = [];
   AppState.notebooks = [];
   AppState.customChapters = [];
   AppState.practiceLogs = [];
+  AppState.testHistory = [];
   localStorage.clear();
   closeBackupModal();
   renderVault();
   updateHeaderMetrics();
   renderNotebooksList();
+  updateTestHistoryBadge();
   showToast('All data cleared', 'info');
 }
 
